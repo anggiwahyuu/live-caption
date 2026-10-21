@@ -354,6 +354,14 @@ See every option with `./run.sh --help`, or in the [Other options](#other-option
 - **You hear nothing after picking BlackHole**: you selected BlackHole itself as the output. Pick the Multi-Output Device instead, so audio goes to your speakers/headset as well.
 - **Captions fall behind**: speech-to-text runs on the CPU on macOS. Try `--model base`, or `--draft-model tiny`.
 
+## Known limitations
+
+- **No automatic reconnect.** If a recorder stops mid-meeting (e.g. a Bluetooth headset disconnects or an audio device is unplugged), that source stops recording and a red error appears. Restart the app to record again. On Windows, changing the default output during a meeting likely keeps recording the old device, so restart the app after switching.
+- **Hallucination filter covers Indonesian and English only.** Fake phrases Whisper produces during silence (like "Thank you for watching") are filtered only in those two languages. For other languages, raise `--threshold` if they show up often.
+- **Library versions aren't pinned.** `requirements.txt` lists package names only, so recreating the environment later may install newer versions. To lock today's versions: `uv pip compile requirements.txt -o requirements.lock`, then install with `uv pip install -r requirements.lock`.
+- **Moving or renaming the project folder breaks `source .venv/bin/activate`**, because the virtualenv stores its absolute path. `./run.sh` and `run.bat` keep working since they call the venv's python directly. To fix `activate`, delete `.venv` and recreate it with the installation steps above.
+- **Windows and macOS support is untested** on real hardware (see sections 2 and 3).
+
 ## Running the tests
 
 The tests use only the Python standard library (`unittest`), so nothing extra needs to be installed:

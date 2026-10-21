@@ -237,6 +237,7 @@ Notes for both engines:
 | **Translate → id** | `Ctrl+T` | Turns translation on/off at any time |
 | **Always on top** | | Keeps the window above the meeting app, like subtitles |
 | **Save as…** | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
+| **Search** | `Ctrl+F` | Opens a search bar above the text (see below) |
 | **Clear** | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
 
 Shortcuts work while the Live Caption window is focused. On macOS, use `Cmd` instead of `Ctrl`.
@@ -247,6 +248,8 @@ How to read the text:
 - **Translation** (yellow italics, starting with `↳`): appears under its final line.
 
 If you scroll up to read older text, new sentences and translations won't make the window jump back down. Scroll back to the bottom to follow the latest text again.
+
+**Searching:** press `Ctrl+F` and type, e.g. `deadline`. Every match is highlighted (upper/lower case doesn't matter) and the newest one is selected, since you're usually looking for something said recently. `Enter` / `F3` goes to the next match, `Shift+Enter` / `Shift+F3` to the previous one; the counter shows e.g. `2 / 5`. New lines that arrive while the search is open are highlighted too, and the view stays where you are. Draft text is not searched, because it is still changing. Only the text on screen is searched: after **Clear**, earlier lines are only in the transcript file. `Esc` closes the search and jumps back to the live captions.
 
 The window's size, position and **Always on top** setting are remembered when you close it, and restored on the next run. If the saved position is off-screen (e.g. a monitor was unplugged), only the size is restored. `--geometry 760x280` overrides it for one run.
 

@@ -782,7 +782,8 @@ def parse_clock(text: str, near: dt.datetime) -> dt.datetime | None:
 
 class App:
     COLORS = {"bg": "#111418", "fg": "#e8eaed", "muted": "#8a919a",
-              "Participant": "#7dd3fc", "Me": "#86efac", "tr": "#fbbf24", "err": "#f87171"}
+              "Participant": "#7dd3fc", "Me": "#86efac", "tr": "#fbbf24", "err": "#f87171",
+              "field": "#1f242b", "match": "#4a3f12", "match_cur": "#b45309"}
 
     def __init__(self, root, args, ui_q: queue.Queue, tr_q: queue.Queue, translator: Translator,
                  paused: threading.Event, summarizer: Summarizer, on_close):
@@ -852,7 +853,9 @@ class App:
         ttk.Button(bar, text="Save as…", command=self._save_as).pack(side="left", padx=3)
         ttk.Button(bar, text="Clear", command=self._clear).pack(side="left", padx=3)
 
-        body = tk.Frame(root, bg=self.COLORS["bg"])
+        self._build_search_bar(tk, ttk)  # shown with Ctrl+F
+
+        body = self.body = tk.Frame(root, bg=self.COLORS["bg"])
         body.pack(fill="both", expand=True, padx=8, pady=6)
         self.text = tk.Text(body, wrap="word", bg=self.COLORS["bg"], fg=self.COLORS["fg"],
                             insertbackground=self.COLORS["fg"], relief="flat", padx=8, pady=6,
@@ -870,16 +873,22 @@ class App:
         self.text.tag_configure("err", foreground=self.COLORS["err"])
         self.text.tag_configure("info", foreground=self.COLORS["muted"], font=small)
         self.text.tag_configure("draft", foreground=self.COLORS["muted"], font=("Sans", args.font_size, "italic"))
+        self.text.tag_configure("match", background=self.COLORS["match"])
+        self.text.tag_configure("match_cur", background=self.COLORS["match_cur"], foreground="#ffffff")
         # Draft area = from the "draft" mark to the end of the text. Final lines are always inserted right before it.
         self.text.mark_set("draft", "end-1c")
 
         # Keyboard shortcuts (window must be focused). Cmd on macOS, Ctrl elsewhere.
         mod = "Command" if IS_MAC else "Control"
         shortcuts = {"p": self._toggle_pause, "t": self._toggle_translate_key,
-                     "s": self._save_as, "l": self._clear, "m": self._summarize}
+                     "s": self._save_as, "l": self._clear, "m": self._summarize, "f": self._open_search}
         for key, fn in shortcuts.items():
             for k in (key, key.upper()):  # also works with Caps Lock on
-                root.bind(f"<{mod}-{k}>", lambda _e, fn=fn: (fn(), "break")[1])
+                for widget in (root, self.search_entry):  # on the entry too, so its own Ctrl+key editing keys don't run
+                    widget.bind(f"<{mod}-{k}>", lambda _e, fn=fn: (fn(), "break")[1])
+        root.bind("<F3>", lambda _e: self._search_step(1))
+        root.bind("<Shift-F3>", lambda _e: self._search_step(-1))
+        root.bind("<Escape>", lambda _e: self._close_search())
 
         if args._config_path:
             self._append([(f"ℹ Settings loaded from {args._config_path}\n", "info")])
@@ -963,6 +972,7 @@ class App:
         self.text.configure(state="disabled")
         if at_bottom:
             self.text.see("end")
+        self._search_refresh()
 
     # ---- drafts (temporary text while someone is still speaking)
     def _set_draft(self, label: str, seg_id: int, text: str) -> None:
@@ -1016,7 +1026,105 @@ class App:
             self.text.configure(state="disabled")
             if at_bottom:  # don't yank the view down while the user is reading older lines
                 self.text.see("end")
+            self._search_refresh()
         self._autosave()
+
+    # ---- search (Ctrl+F)
+    def _build_search_bar(self, tk, ttk) -> None:
+        c = self.COLORS
+        self.search_bar = tk.Frame(self.root, bg=c["bg"])
+        self.search_var = tk.StringVar()
+        self.search_entry = tk.Entry(self.search_bar, textvariable=self.search_var, bg=c["field"], fg=c["fg"],
+                                     insertbackground=c["fg"], relief="flat", highlightthickness=1,
+                                     highlightbackground=c["muted"], highlightcolor=c["Participant"])
+        self.search_entry.pack(side="left", fill="x", expand=True, ipady=2)
+        self.search_count = tk.Label(self.search_bar, text="", width=11, bg=c["bg"], fg=c["muted"])
+        self.search_count.pack(side="left", padx=6)
+        ttk.Button(self.search_bar, text="↑", width=3, command=lambda: self._search_step(-1)).pack(side="left")
+        ttk.Button(self.search_bar, text="↓", width=3, command=lambda: self._search_step(1)).pack(side="left", padx=3)
+        ttk.Button(self.search_bar, text="✕", width=3, command=self._close_search).pack(side="left")
+        self.search_entry.bind("<Return>", lambda _e: self._search_step(1))
+        self.search_entry.bind("<Shift-Return>", lambda _e: self._search_step(-1))
+        self.search_entry.bind("<Escape>", lambda _e: (self._close_search(), "break")[1])
+        self.search_var.trace_add("write", lambda *_: self._search_refresh(jump=True))
+        self.matches: list[tuple[str, str]] = []  # (start, end) text indices of every match
+        self.match_idx = -1
+        self.search_visible = False  # not winfo_ismapped(): that only turns true after Tk redraws
+
+    def _search_open(self) -> bool:
+        return self.search_visible
+
+    def _open_search(self) -> None:
+        if not self.search_visible:
+            self.search_visible = True
+            self.search_bar.pack(fill="x", padx=8, pady=(6, 0), before=self.body)
+        self.search_entry.focus_set()
+        self.search_entry.select_range(0, "end")
+        self._search_refresh(jump=True)
+
+    def _close_search(self) -> None:
+        if not self._search_open():
+            return
+        self.search_visible = False
+        self.search_bar.pack_forget()
+        self.text.tag_remove("match", "1.0", "end")
+        self.text.tag_remove("match_cur", "1.0", "end")
+        self.matches, self.match_idx = [], -1
+        if "search_cur" in self.text.mark_names():
+            self.text.mark_unset("search_cur")
+        self.root.focus_set()
+        self.text.see("end")  # back to the live captions
+
+    def _search_refresh(self, jump: bool = False) -> None:
+        """Highlight every match of the query in the final text (drafts are still changing, so they're skipped).
+        jump=True (the query changed): select the newest match and scroll to it. Otherwise (new lines arrived):
+        keep the current match selected and the view where it is."""
+        if not self._search_open():
+            return
+        current = "search_cur" in self.text.mark_names() and 0 <= self.match_idx < len(self.matches)
+        self.text.tag_remove("match", "1.0", "end")
+        self.text.tag_remove("match_cur", "1.0", "end")
+        query = self.search_var.get()
+        self.matches = []
+        if query:
+            count, idx = self.tk.IntVar(), "1.0"
+            while pos := self.text.search(query, idx, stopindex="draft", nocase=True, count=count):
+                end = f"{pos}+{count.get()}c"
+                self.matches.append((pos, end))
+                self.text.tag_add("match", pos, end)
+                idx = end
+        if not self.matches:
+            self.match_idx = -1
+        elif jump or not current:
+            self.match_idx = len(self.matches) - 1
+        else:
+            cur = self.text.index("search_cur")
+            self.match_idx = next((i for i, (a, _) in enumerate(self.matches) if self.text.compare(a, "==", cur)),
+                                  min(self.match_idx, len(self.matches) - 1))
+        self._show_match(scroll=jump)
+
+    def _search_step(self, step: int):
+        if not self._search_open():
+            return None
+        if self.matches:
+            self.match_idx = (self.match_idx + step) % len(self.matches)
+            self._show_match(scroll=True)
+        return "break"
+
+    def _show_match(self, scroll: bool) -> None:
+        self.text.tag_remove("match_cur", "1.0", "end")
+        if self.match_idx < 0:
+            text = "No matches" if self.search_var.get() else ""
+            self.search_count.configure(text=text, fg=self.COLORS["err" if text else "muted"])
+            return
+        start, end = self.matches[self.match_idx]
+        self.text.tag_add("match_cur", start, end)
+        # A mark moves with the text when lines or translations are inserted above it, so the same match
+        # stays selected after the next refresh (plain indices like "4.29" would then point elsewhere).
+        self.text.mark_set("search_cur", start)
+        self.search_count.configure(text=f"{self.match_idx + 1} / {len(self.matches)}", fg=self.COLORS["muted"])
+        if scroll:
+            self.text.see(start)
 
     # ---- buttons
     def _toggle_translate(self) -> None:
@@ -1047,6 +1155,7 @@ class App:
         self.text.configure(state="disabled")
         self.view_floor = self.next_id  # only the screen is cleared; the transcript file stays intact
         self._render_drafts()
+        self._search_refresh()
 
     def _save_as(self) -> None:
         from tkinter import filedialog, simpledialog

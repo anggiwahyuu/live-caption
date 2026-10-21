@@ -466,6 +466,24 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 - **Moving or renaming the project folder breaks `source .venv/bin/activate`**, because the virtualenv stores its absolute path. `./run.sh` and `run.bat` keep working since they call the venv's python directly. To fix `activate`, delete `.venv` and recreate it with the installation steps above.
 - **Windows and macOS support is untested** on real hardware (see sections 2 and 3).
 
+## Project structure
+
+`live_caption.py` is only the launcher that `run.sh` / `run.bat` start. The code lives in the `lib/` package:
+
+| Module | What's in it |
+|---|---|
+| `main.py` | Wires everything together: creates the recorders, workers and window, and starts them |
+| `config.py` | Command-line options, the `config.toml` settings file, the remembered window state |
+| `common.py` | Shared constants: audio format (16 kHz, 30 ms frames), OS checks, source labels |
+| `audio.py` | Recording (`parec` / `pw-record` / WASAPI / BlackHole), resampling, splitting speech into sentences, the queue to Whisper |
+| `transcriber.py` | Loading faster-whisper (GPU with CPU fallback) and turning audio into text; `--vocab` |
+| `translation.py` | Google / Argos translation of final lines |
+| `summary.py` | Meeting summaries with Ollama or the Claude API |
+| `subtitles.py` | SRT / WebVTT export |
+| `ui.py` | The Tkinter window: captions, drafts, search, pause, summary window, transcript saving |
+
+Data flows one way: `audio` → `transcriber` → `ui` (→ `translation` / `summary` on demand). Modules talk through queues, so only `ui` touches Tkinter and only `main` knows all the pieces. A new feature usually means one new module plus a few lines in `ui.py`, `config.py` (its options) and `main.py` (to wire it in).
+
 ## Running the tests
 
 The tests use only the Python standard library (`unittest`), so nothing extra needs to be installed:

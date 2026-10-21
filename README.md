@@ -20,40 +20,117 @@ Follow the installation section for your OS (1, 2 or 3), then continue with [4. 
 
 ---
 
-## 1. Installation on Linux (CachyOS)
+## 1. Installation on Linux
 
-### 1.1 Check the NVIDIA driver
+Works on any distribution with PulseAudio or PipeWire (the default on practically every desktop distribution). Commands are given for the common families:
 
-GTX 10xx (Pascal) is **not supported** by NVIDIA driver 590 and newer. You need the **580xx** series.
+| Family | Examples |
+|---|---|
+| **Debian/Ubuntu** | Ubuntu, Kubuntu, Linux Mint, Pop!_OS, Zorin OS, elementary OS, Debian |
+| **Fedora** | Fedora Workstation/KDE, Nobara |
+| **Arch** | CachyOS, Arch Linux, EndeavourOS, Manjaro, Garuda |
+| **openSUSE** | Tumbleweed, Leap |
+
+### 1.1 NVIDIA driver (only with an NVIDIA GPU)
+
+No NVIDIA GPU? Skip this step: the app runs on the CPU (slower; use `--model base` if captions fall behind).
+
+You only need the **driver**. The CUDA libraries the app uses (cuBLAS, cuDNN) are installed by `pip` in step 1.3, so **don't install the CUDA toolkit**.
+
+Check whether a driver is already working:
 
 ```bash
 nvidia-smi
 ```
 
-If this shows your GPU and driver version `580.xx`, you're fine. Also note your **VRAM** (2 GB, 3 GB, or 4 GB), since it decides which model to pick in [Step 9](#step-9--choosing-a-model-for-your-vram).
+If it shows your GPU, note the driver version and your **VRAM** (2 GB, 3 GB, 4 GB, …): it decides which model to pick in [Step 9](#step-9--choosing-a-model-for-your-vram). Then skip to 1.2.
 
-If `nvidia-smi` errors out, let CachyOS's built-in tool pick the right driver:
+**Which driver version?** NVIDIA's 590 and newer drivers dropped **GTX 9xx and GTX 10xx** (Maxwell/Pascal, e.g. the GTX 1050). Those cards need the **580** series, the last one that supports them. RTX 20xx and newer work with any recent driver.
+
+<details>
+<summary><b>Debian/Ubuntu</b> (Ubuntu, Mint, Pop!_OS, …)</summary>
 
 ```bash
-sudo chwd -a
+ubuntu-drivers devices                 # lists the drivers for your GPU; "recommended" is usually right
+sudo apt install nvidia-driver-580     # GTX 9xx/10xx. Newer GPUs: the recommended version
+sudo reboot
 ```
 
-Don't install `nvidia-open` or 590+ packages manually.
+- **Linux Mint:** you can also use *Driver Manager* from the menu; pick `nvidia-driver-580` for a GTX 9xx/10xx.
+- **Pop!_OS:** if you installed the NVIDIA ISO, the driver is already there; check with `nvidia-smi`.
+- **Debian:** enable the `non-free` and `non-free-firmware` components and follow the [Debian NVIDIA guide](https://wiki.debian.org/NvidiaGraphicsDrivers); `ubuntu-drivers` doesn't exist there.
+- With **Secure Boot** on, the install asks for a password and, after the reboot, a blue *MOK* screen asks for it again: choose *Enroll MOK* and type it, or the driver won't load.
+
+</details>
+
+<details>
+<summary><b>Fedora</b></summary>
+
+The driver comes from the [RPM Fusion](https://rpmfusion.org/Configuration) **nonfree** repository:
+
+```bash
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+                 https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+
+# GTX 9xx/10xx (580 legacy branch):
+sudo dnf install akmod-nvidia-580xx xorg-x11-drv-nvidia-580xx-cuda
+# RTX 20xx and newer:
+sudo dnf install akmod-nvidia xorg-x11-drv-nvidia-cuda
+```
+
+Wait about 5 minutes before rebooting, so the kernel module can finish building in the background (`modinfo -F version nvidia` prints a version once it's done). If `580xx` packages are "not found", the full RPM Fusion nonfree repository isn't enabled: run the first command above.
+
+</details>
+
+<details>
+<summary><b>Arch</b> (CachyOS, Arch Linux, EndeavourOS, Manjaro)</summary>
+
+- **CachyOS:** let its hardware tool pick the right driver (it knows about the 580 branch):
+
+  ```bash
+  sudo chwd -a
+  ```
+
+- **Arch Linux / EndeavourOS:** GTX 9xx/10xx need `nvidia-580xx-dkms` from the AUR (with an AUR helper such as `yay`); the official `nvidia-open` packages no longer support them. RTX 20xx and newer: `sudo pacman -S nvidia-open`.
+- **Manjaro:** use *Manjaro Settings Manager → Hardware Configuration*. On a GTX 9xx/10xx, check with `nvidia-smi` afterwards that it installed a 580 driver.
+
+Don't install `nvidia-open` or 590+ packages manually on a GTX 9xx/10xx.
+
+</details>
+
+<details>
+<summary><b>openSUSE</b></summary>
+
+Use the NVIDIA repository as described in the [openSUSE NVIDIA guide](https://en.opensuse.org/SDB:NVIDIA_drivers). For a GTX 9xx/10xx, choose the 580 driver branch, not the newest one.
+
+</details>
 
 ### 1.2 System packages
 
+Two things are needed: the `parec` command to record audio, and `uv` to create the Python environment.
+
+| Family | Command |
+|---|---|
+| Debian/Ubuntu | `sudo apt install pulseaudio-utils curl` |
+| Fedora | `sudo dnf install pulseaudio-utils uv` |
+| Arch / CachyOS | `sudo pacman -S --needed libpulse tk uv` |
+| openSUSE | `sudo zypper install pulseaudio-utils curl` |
+
+Where `uv` isn't in the list above (Debian/Ubuntu, openSUSE, and any other distribution), install it with its official script, then **close and reopen the terminal** so the `uv` command is found:
+
 ```bash
-sudo pacman -S --needed libpulse tk uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-- `libpulse` provides the `parec` command used to record audio (it runs on top of pipewire-pulse, the default on CachyOS). If `parec` is missing or can't connect, the app automatically switches to `pw-record`, which ships with PipeWire.
-- `uv` is used to create the Python environment.
+About the audio packages:
 
-On other distributions, `parec` is often in a separate package (Debian/Ubuntu: `pulseaudio-utils`).
+- `parec` (in `pulseaudio-utils`, or `libpulse` on Arch) works with both PulseAudio and PipeWire (through `pipewire-pulse`, which every desktop distribution with PipeWire includes).
+- If `parec` is missing or can't connect, the app automatically switches to `pw-record`, which comes with PipeWire. So on a PipeWire system this step is optional for audio, but installing `parec` is still recommended.
+- Tkinter (the window) is included in the Python that `uv` installs, so no `python3-tk` package is needed.
 
 ### 1.3 Python environment
 
-CachyOS ships the latest Python, which often doesn't have wheels for AI libraries yet. That's why a separate **Python 3.12** is used via `uv`:
+The same on every distribution. A separate **Python 3.12** is installed by `uv`: distributions ship either a newer Python that AI libraries don't have packages for yet (Arch, Fedora), or an older one (Debian, Ubuntu LTS). It doesn't touch your system Python.
 
 ```bash
 cd live-caption
@@ -62,7 +139,7 @@ uv pip install -r requirements.txt
 chmod +x run.sh
 ```
 
-Whisper models are downloaded automatically on first run, to `~/.cache/huggingface`.
+This downloads about 1–2 GB (faster-whisper and the CUDA libraries). Whisper models are downloaded automatically on first run, to `~/.cache/huggingface`.
 
 ## 2. Installation on Windows
 
@@ -299,8 +376,8 @@ There are two engines:
 **a) Ollama, local (default).** Nothing leaves your computer. Install [Ollama](https://ollama.com) once and download a model:
 
 ```bash
-sudo pacman -S ollama            # Windows/macOS: installer from ollama.com
-sudo systemctl enable --now ollama
+curl -fsSL https://ollama.com/install.sh | sh   # any Linux distribution; Windows/macOS: installer from ollama.com
+# (Arch/CachyOS alternative: sudo pacman -S ollama && sudo systemctl enable --now ollama)
 ollama pull qwen2.5:3b           # ~2 GB, handles Indonesian and English
 ```
 
@@ -434,9 +511,9 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 - **Status says CPU instead of CUDA**: read the error message in the status line. The most common causes are a driver that isn't the 580xx series, or running out of VRAM (use a smaller model).
 - **`CUDA out of memory`**: use a smaller model, e.g. `medium` → `small`.
 - **No text at all**: make sure the meeting audio goes through the default output. Test with `parec --device=@DEFAULT_MONITOR@ | head -c 100000 | wc -c` while playing any sound. If the output is on HDMI or Bluetooth, use `--monitor`.
-- **`Neither parec nor pw-record was found` (Linux)**: install `libpulse` (provides `parec`) or `pipewire` (provides `pw-record`).
+- **`Neither parec nor pw-record was found` (Linux)**: install the package that provides `parec` for your distribution (see [1.2 System packages](#12-system-packages)): `pulseaudio-utils` on Debian/Ubuntu, Fedora and openSUSE, `libpulse` on Arch.
 - **`Recording 'Participant' stopped (pw-record)` (Linux)**: both recorders failed. Check that PipeWire is running: `systemctl --user status pipewire`.
-- **Window doesn't stay on top (Wayland/KDE)**: right-click the title bar → *More Actions* → *Keep Above Others*.
+- **Window doesn't stay on top (Wayland)**: KDE: right-click the title bar → *More Actions* → *Keep Above Others*. GNOME (Ubuntu, Fedora): right-click the title bar → *Always on Top*.
 - **Status "N sentences behind"**: the GPU can't keep up. Try `--draft-interval 0.5`, `--draft-model tiny`, or a smaller main model.
 - **Odd text like "Terima kasih." / "Thank you." during silence**: a typical Whisper hallucination. Some of it is already filtered; raise `--threshold` if it still happens often.
 

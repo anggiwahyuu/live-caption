@@ -19,7 +19,10 @@ from .ui import App
 def main() -> None:
     args = parse_args()
     if IS_LINUX and not (shutil.which("parec") or shutil.which("pw-record")):
-        sys.exit("Neither parec nor pw-record was found. Install one with: sudo pacman -S libpulse (or pipewire)")
+        sys.exit("Neither parec nor pw-record was found. Install parec with one of:\n"
+                 "  Debian/Ubuntu/Mint:  sudo apt install pulseaudio-utils\n"
+                 "  Fedora / openSUSE:   sudo dnf install pulseaudio-utils / sudo zypper install pulseaudio-utils\n"
+                 "  Arch / CachyOS:      sudo pacman -S libpulse")
 
     import tkinter as tk
 

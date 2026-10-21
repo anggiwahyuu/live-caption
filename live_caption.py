@@ -11,6 +11,7 @@ Pipeline:
     -> faster-whisper (STT, GPU via CUDA or CPU fallback; small model for drafts, main model for finals)
     -> TranslationWorker (optional, can be toggled from the UI)
     -> Tkinter overlay + transcript auto-saved to a .md file
+    -> Summarizer (on demand: summary, decisions and action items via Ollama or Claude)
 """
 
 from __future__ import annotations
@@ -18,12 +19,15 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import json
 import os
 import queue
 import shutil
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -107,9 +111,11 @@ class Segmenter:
 
     def __init__(self, label: str, hub: AudioHub, threshold: float, silence_ms: int,
                  max_seconds: float, draft_interval: float = 0.5,
-                 min_voiced_ms: int = 250, preroll_ms: int = 300):
+                 min_voiced_ms: int = 250, preroll_ms: int = 300,
+                 paused: threading.Event | None = None):
         self.label = label
         self.hub = hub
+        self.paused = paused or threading.Event()  # set = audio is ignored (Pause button)
         self.threshold = threshold
         self.silence_limit = max(1, silence_ms // FRAME_MS)
         self.max_frames = int(max_seconds * 1000 // FRAME_MS)
@@ -130,6 +136,12 @@ class Segmenter:
         return rms > max(self.threshold, self.noise_floor * 3.0)
 
     def feed(self, frame: np.ndarray) -> None:
+        if self.paused.is_set():
+            # Lock what was said before the pause, then ignore audio until resumed.
+            self.flush()
+            self.speech_run = 0
+            self.preroll.clear()
+            return
         rms = float(np.sqrt(np.mean(frame * frame)))
         speech = self._is_speech(rms)
 
@@ -560,7 +572,7 @@ def add_cuda_dll_dirs() -> None:
                     os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
 
 
-def make_transcribe_fn(beam_size: int):
+def make_transcribe_fn(beam_size: int, hotwords: str | None = None):
     def _transcribe(model, audio, lang, final: bool = True):
         # Drafts are made as fast as possible (beam 1, no VAD); finals use the full settings.
         return model.transcribe(
@@ -570,8 +582,140 @@ def make_transcribe_fn(beam_size: int):
             vad_filter=final,                 # faster-whisper's built-in Silero VAD removes non-speech parts
             condition_on_previous_text=False, # prevents hallucinations chaining across segments
             without_timestamps=True,
+            hotwords=hotwords,                # --vocab: names/jargon Whisper should prefer
         )
     return _transcribe
+
+
+def load_vocab(args) -> str | None:
+    """--vocab "a, b" and/or --vocab-file (one term per line, # = comment) -> one hotwords string."""
+    terms = [t.strip() for t in (args.vocab or "").split(",")]
+    if args.vocab_file:
+        path = Path(args.vocab_file).expanduser()
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            sys.exit(f"Can't read --vocab-file {path}: {e}")
+        terms += [line.split("#", 1)[0].strip() for line in lines]
+    terms = list(dict.fromkeys(t for t in terms if t))  # drop empties and duplicates, keep order
+    return ", ".join(terms) or None
+
+
+# --------------------------------------------------------------------------- summary
+
+SUMMARY_PROMPT = """You summarize meeting transcripts produced by live speech-to-text.
+
+The transcript may contain recognition errors, cut-off sentences and repeated fragments. Infer what was meant,
+but never invent facts, names, numbers or dates that are not supported by the transcript.
+"Me" is the person who recorded the meeting; "Participant" is everyone else (speakers are not told apart).
+
+Write the summary in the main language of the transcript, in Markdown, with exactly these sections
+(translate the headings into that language):
+
+### Summary
+3-6 sentences on what the meeting was about and what came out of it.
+
+### Decisions
+Bullet list of decisions that were made. Write "-" if there were none.
+
+### Action items
+Bullet list: who does what, and by when if mentioned. Write "-" if there were none.
+
+### Open questions
+Bullet list of questions or issues left unresolved. Write "-" if there were none.
+
+Output only these sections, nothing before or after them."""
+
+
+class Summarizer:
+    """Summarizes the transcript with a local Ollama model (default) or the Claude API (opt-in)."""
+
+    DEFAULT_MODELS = {"ollama": "qwen2.5:3b", "claude": "claude-opus-5-5"}
+
+    def __init__(self, provider: str, model: str | None, ollama_url: str):
+        self.provider = provider
+        self.model = model or self.DEFAULT_MODELS[provider]
+        self.ollama_url = ollama_url.rstrip("/")
+
+    def describe(self) -> str:
+        return f"{self.model} via {'Ollama (local)' if self.provider == 'ollama' else 'Claude API (online)'}"
+
+    def summarize(self, transcript: str) -> str:
+        if self.provider == "claude":
+            return self._claude(transcript)
+        return self._ollama(transcript)
+
+    def _ollama(self, transcript: str) -> str:
+        # Ollama's default context window (2–4k tokens) silently cuts long transcripts: size it to the input.
+        num_ctx = min(32768, max(4096, len(transcript) // 3 + 2048))
+        body = {"model": self.model, "stream": False, "options": {"num_ctx": num_ctx},
+                "messages": [{"role": "system", "content": SUMMARY_PROMPT},
+                             {"role": "user", "content": transcript}]}
+        req = urllib.request.Request(f"{self.ollama_url}/api/chat", data=json.dumps(body).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = json.load(resp)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            if e.code == 404:
+                raise RuntimeError(f"Ollama model '{self.model}' not found. Download it with: ollama pull {self.model}")
+            raise RuntimeError(f"Ollama error {e.code}: {detail}")
+        except (urllib.error.URLError, OSError) as e:
+            raise RuntimeError(f"Can't reach Ollama at {self.ollama_url} ({e}). "
+                               f"Install it from ollama.com and make sure it is running.")
+        return data["message"]["content"].strip()
+
+    def _claude(self, transcript: str) -> str:
+        try:
+            import anthropic
+        except ImportError:
+            raise RuntimeError("The 'anthropic' package is missing. Install it with: uv pip install anthropic")
+        client = anthropic.Anthropic()  # ANTHROPIC_API_KEY or an `ant auth login` profile
+        no_credentials = "Claude API: no valid credentials. Set ANTHROPIC_API_KEY or run `ant auth login`."
+        try:
+            with client.beta.messages.stream(
+                model=self.model,
+                max_tokens=16000,
+                system=SUMMARY_PROMPT,
+                output_config={"effort": "medium"},
+                betas=["server-side-fallback-2026-07-01"],
+                extra_body={"fallbacks": "default"},  # if the model declines, the API retries on a fallback model
+                messages=[{"role": "user", "content": transcript}],
+            ) as stream:
+                message = stream.get_final_message()
+        except anthropic.AuthenticationError:
+            raise RuntimeError(no_credentials)
+        except TypeError as e:  # raised by the SDK when no credentials are configured at all
+            if "authentication" not in str(e).lower():
+                raise
+            raise RuntimeError(no_credentials)
+        except anthropic.RateLimitError:
+            raise RuntimeError("Claude API: rate limited. Try again in a minute.")
+        except anthropic.APIStatusError as e:
+            raise RuntimeError(f"Claude API error {e.status_code}: {e.message}")
+        except anthropic.APIConnectionError:
+            raise RuntimeError("Claude API: network error. Check your internet connection.")
+        if message.stop_reason == "refusal":
+            raise RuntimeError("Claude declined to summarize this transcript.")
+        text = "".join(b.text for b in message.content if b.type == "text").strip()
+        if message.stop_reason == "max_tokens":
+            text += "\n\n_(summary cut off)_"
+        return text
+
+
+class SummaryWorker(threading.Thread):
+    """Runs one summary in the background so the window stays responsive."""
+
+    def __init__(self, summarizer: Summarizer, transcript: str, ui_q: queue.Queue):
+        super().__init__(daemon=True)
+        self.summarizer, self.transcript, self.ui_q = summarizer, transcript, ui_q
+
+    def run(self) -> None:
+        try:
+            self.ui_q.put(("summary", self.summarizer.summarize(self.transcript)))
+        except Exception as e:
+            self.ui_q.put(("summary_failed", str(e)))
 
 
 # --------------------------------------------------------------------------- UI
@@ -580,12 +724,18 @@ class App:
     COLORS = {"bg": "#111418", "fg": "#e8eaed", "muted": "#8a919a",
               "Participant": "#7dd3fc", "Me": "#86efac", "tr": "#fbbf24", "err": "#f87171"}
 
-    def __init__(self, root, args, ui_q: queue.Queue, tr_q: queue.Queue, translator: Translator, on_close):
+    def __init__(self, root, args, ui_q: queue.Queue, tr_q: queue.Queue, translator: Translator,
+                 paused: threading.Event, summarizer: Summarizer, on_close):
         import tkinter as tk
         from tkinter import ttk
 
         self.tk = tk
         self.root, self.args, self.ui_q, self.tr_q, self.translator = root, args, ui_q, tr_q, translator
+        self.paused = paused
+        self.summarizer = summarizer
+        self.summary: tuple[dt.datetime, str] | None = None  # (when, Markdown) of the latest summary
+        self.summary_win = None
+        self.last_status = ("Starting…", "muted")  # restored when resuming from pause
         self.records: dict[int, dict] = {}
         self.next_id = 0
         self.view_floor = 0  # lines with id < this have been cleared from the screen
@@ -613,6 +763,9 @@ class App:
         self.status = tk.Label(bar, text="Starting…", anchor="w", bg=self.COLORS["bg"], fg=self.COLORS["muted"])
         self.status.pack(side="left", fill="x", expand=True)
 
+        self.pause_btn = ttk.Button(bar, text="Pause", command=self._toggle_pause)
+        self.pause_btn.pack(side="left", padx=3)
+
         self.tr_var = tk.BooleanVar(value=translator.enabled)
         tk.Checkbutton(bar, text=f"Translate → {translator.target}", variable=self.tr_var,
                        command=self._toggle_translate, bg=self.COLORS["bg"], fg=self.COLORS["fg"],
@@ -626,6 +779,8 @@ class App:
                        activebackground=self.COLORS["bg"], activeforeground=self.COLORS["fg"],
                        highlightthickness=0).pack(side="left", padx=6)
 
+        self.summary_btn = ttk.Button(bar, text="Summary", command=self._summarize)
+        self.summary_btn.pack(side="left", padx=3)
         ttk.Button(bar, text="Save as…", command=self._save_as).pack(side="left", padx=3)
         ttk.Button(bar, text="Clear", command=self._clear).pack(side="left", padx=3)
 
@@ -650,6 +805,14 @@ class App:
         # Draft area = from the "draft" mark to the end of the text. Final lines are always inserted right before it.
         self.text.mark_set("draft", "end-1c")
 
+        # Keyboard shortcuts (window must be focused). Cmd on macOS, Ctrl elsewhere.
+        mod = "Command" if IS_MAC else "Control"
+        shortcuts = {"p": self._toggle_pause, "t": self._toggle_translate_key,
+                     "s": self._save_as, "l": self._clear, "m": self._summarize}
+        for key, fn in shortcuts.items():
+            for k in (key, key.upper()):  # also works with Caps Lock on
+                root.bind(f"<{mod}-{k}>", lambda _e, fn=fn: (fn(), "break")[1])
+
         root.after(30, self._poll)
 
     # ---- events from other threads
@@ -659,9 +822,9 @@ class App:
                 msg = self.ui_q.get_nowait()
                 kind = msg[0]
                 if kind == "status":
-                    self.status.configure(text=msg[1], fg=self.COLORS["muted"])
+                    self._set_status(msg[1], "muted")
                 elif kind == "error":
-                    self.status.configure(text=msg[1], fg=self.COLORS["err"])
+                    self._set_status(msg[1], "err")
                     self._append([(f"⚠ {msg[1]}\n", "err")])
                 elif kind == "info":  # notice only (e.g. recorder fallback): keep the status line as it is
                     self._append([(f"ℹ {msg[1]}\n", "info")])
@@ -674,9 +837,19 @@ class App:
                     self._render_drafts()
                 elif kind == "translation":
                     self._add_translation(msg[1], msg[2])
+                elif kind == "summary":
+                    self._show_summary(msg[1])
+                elif kind == "summary_failed":
+                    self.summary_btn.configure(state="normal")
+                    self._set_status(f"Summary failed: {msg[1]}", "err")
         except queue.Empty:
             pass
         self.root.after(30, self._poll)
+
+    def _set_status(self, text: str, color: str) -> None:
+        self.last_status = (text, color)
+        if not self.paused.is_set():  # keep "Paused" visible until resumed
+            self.status.configure(text=text, fg=self.COLORS[color])
 
     def _append(self, parts, mark: str | None = None) -> None:
         """Insert final text right above the draft area."""
@@ -754,6 +927,24 @@ class App:
     def _toggle_translate(self) -> None:
         self.translator.enabled = self.tr_var.get()
 
+    def _toggle_translate_key(self) -> None:
+        self.tr_var.set(not self.tr_var.get())
+        self._toggle_translate()
+
+    def _toggle_pause(self) -> None:
+        mod = "Cmd" if IS_MAC else "Ctrl"
+        if self.paused.is_set():
+            self.paused.clear()
+            self.pause_btn.configure(text="Pause")
+            self.status.configure(text=self.last_status[0], fg=self.COLORS[self.last_status[1]])
+            self._append([(f"▶ Resumed at {dt.datetime.now():%H:%M:%S}\n", "info")])
+        else:
+            self.paused.set()
+            self.pause_btn.configure(text="Resume")
+            self.status.configure(text=f"⏸ Paused — nothing is being transcribed ({mod}+P to resume)",
+                                  fg=self.COLORS["tr"])
+            self._append([(f"⏸ Paused at {dt.datetime.now():%H:%M:%S}\n", "info")])
+
     def _clear(self) -> None:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
@@ -770,6 +961,46 @@ class App:
             Path(path).write_text(self._render(), encoding="utf-8")
             self.status.configure(text=f"Saved: {path}", fg=self.COLORS["muted"])
 
+    # ---- summary
+    def _summarize(self) -> None:
+        if str(self.summary_btn.cget("state")) == "disabled":
+            return  # a summary is already being made
+        lines = [f"[{r['ts']:%H:%M:%S}] {r['label']}: {r['text']}" for r in self.records.values()]
+        if not lines:
+            self._set_status("Nothing to summarize yet", "muted")
+            return
+        self.summary_btn.configure(state="disabled")
+        self._set_status(f"Summarizing {len(lines)} lines with {self.summarizer.describe()}…", "muted")
+        SummaryWorker(self.summarizer, "\n".join(lines), self.ui_q).start()
+
+    def _show_summary(self, text: str) -> None:
+        tk = self.tk
+        self.summary = (dt.datetime.now(), text)
+        self.summary_btn.configure(state="normal")
+        self._set_status(f"Summary ready — saved in {self.transcript_path.name}", "muted")
+        self._autosave()
+
+        if self.summary_win is not None and self.summary_win.winfo_exists():
+            self.summary_win.destroy()
+        win = self.summary_win = tk.Toplevel(self.root)
+        win.title("Meeting summary")
+        win.geometry("640x480")
+        win.configure(bg=self.COLORS["bg"])
+        win.attributes("-topmost", self.pin_var.get())
+        box = tk.Text(win, wrap="word", bg=self.COLORS["bg"], fg=self.COLORS["fg"], relief="flat",
+                      padx=10, pady=8, font=("Sans", self.args.font_size), highlightthickness=0)
+        box.insert("1.0", text)
+        box.configure(state="disabled")  # still selectable, so parts can be copied
+
+        def copy() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._set_status("Summary copied to the clipboard", "muted")
+
+        from tkinter import ttk
+        ttk.Button(win, text="Copy", command=copy).pack(side="bottom", anchor="e", padx=8, pady=6)
+        box.pack(fill="both", expand=True)
+
     # ---- transcript
     def _render(self) -> str:
         # Month names are hard-coded so the header doesn't depend on the system locale.
@@ -777,6 +1008,10 @@ class App:
                   "August", "September", "October", "November", "December"]
         d = self.started
         lines = [f"# Meeting transcript — {months[d.month - 1]} {d.day}, {d.year}, {d:%H:%M}", ""]
+        if self.summary:
+            when, text = self.summary
+            lines += [f"## Summary (made at {when:%H:%M}, {self.summarizer.describe()})", "", text, "",
+                      "## Transcript", ""]
         for rec in self.records.values():
             lines.append(f"- **[{rec['ts']:%H:%M:%S}] {rec['label']}:** {rec['text']}")
             if rec["tr"]:
@@ -820,12 +1055,22 @@ def parse_args():
                    help="Small model used only for draft text, to keep captions live (tiny | base | ...). "
                         "'same' = use the main model (default: base)")
     p.add_argument("--beam-size", type=int, default=1, help="1 = fastest; 3–5 = more accurate but slower")
+    p.add_argument("--vocab", default=None,
+                   help='Comma-separated names/terms Whisper should recognize, e.g. "Anggi, Kubernetes, OKR"')
+    p.add_argument("--vocab-file", default=None,
+                   help="Text file with one name/term per line (# starts a comment). Combined with --vocab")
+    p.add_argument("--summarizer", default="ollama", choices=["ollama", "claude"],
+                   help="Engine for the Summary button. ollama = local & private (default), "
+                        "claude = Claude API, better quality but the transcript is sent to Anthropic")
+    p.add_argument("--summary-model", default=None,
+                   help="Model for summaries (default: qwen2.5:3b for ollama, claude-opus-5-5 for claude)")
+    p.add_argument("--ollama-url", default="http://localhost:11434", help="Address of the Ollama server")
     p.add_argument("--font-size", type=int, default=13)
     p.add_argument("--opacity", type=float, default=0.93)
     p.add_argument("--geometry", default="760x280")
     p.add_argument("--out-dir", default="~/LiveCaption", help="Folder for auto-saved transcripts")
     args = p.parse_args()
-    args._whisper_transcribe = make_transcribe_fn(args.beam_size)
+    args._whisper_transcribe = make_transcribe_fn(args.beam_size, load_vocab(args))
     return args
 
 
@@ -837,6 +1082,7 @@ def main() -> None:
     import tkinter as tk
 
     stop = threading.Event()
+    paused = threading.Event()
     hub = AudioHub()
     ui_q: queue.Queue = queue.Queue()
     tr_q: queue.Queue = queue.Queue()
@@ -850,7 +1096,8 @@ def main() -> None:
     names = ["system", "mic"] if args.source == "both" else [args.source]
     captures = []
     for name in names:
-        seg = Segmenter(SOURCES[name], hub, args.threshold, args.silence_ms, args.max_seconds, args.draft_interval)
+        seg = Segmenter(SOURCES[name], hub, args.threshold, args.silence_ms, args.max_seconds, args.draft_interval,
+                        paused=paused)
         captures.append(AudioCapture(name, args.monitor if name == "system" else None, seg, stop, report))
 
     workers = [*captures, Transcriber(args, hub, ui_q, stop), TranslationWorker(translator, tr_q, ui_q, stop)]
@@ -863,7 +1110,8 @@ def main() -> None:
             c.stop()
         root.destroy()
 
-    App(root, args, ui_q, tr_q, translator, shutdown)
+    summarizer = Summarizer(args.summarizer, args.summary_model, args.ollama_url)
+    App(root, args, ui_q, tr_q, translator, paused, summarizer, shutdown)
     for w in workers:
         w.start()
     try:

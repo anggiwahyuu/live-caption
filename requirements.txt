@@ -10,3 +10,5 @@ sounddevice; sys_platform == "darwin"    # macOS: CoreAudio (system audio via Bl
 deep-translator
 # Offline translation (--translator argos). Large dependencies (pulls in torch & stanza)
 argostranslate
+# Meeting summaries with --summarizer claude (optional; the default, Ollama, needs no package)
+anthropic

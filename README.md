@@ -30,7 +30,7 @@ GTX 10xx (Pascal) is **not supported** by NVIDIA driver 590 and newer. You need 
 nvidia-smi
 ```
 
-If this shows your GPU and driver version `580.xx`, you're fine. Also note your **VRAM** (2 GB, 3 GB, or 4 GB), since it decides which model to pick in [Step 8](#step-8--choosing-a-model-for-your-vram).
+If this shows your GPU and driver version `580.xx`, you're fine. Also note your **VRAM** (2 GB, 3 GB, or 4 GB), since it decides which model to pick in [Step 9](#step-9--choosing-a-model-for-your-vram).
 
 If `nvidia-smi` errors out, let CachyOS's built-in tool pick the right driver:
 
@@ -222,7 +222,7 @@ Notes for both engines:
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ Ready — small + draft base @ CUDA    [✓] Translate → id  [✓] Always on top  │
-│                                                   [Save as…]  [Clear]       │
+│                               [Pause]  [Summary]  [Save as…]  [Clear]       │
 ├────────────────────────────────────────────────────────────────────────────┤
 │ [10:02:15] Participant: Good morning everyone, let's start the meeting.     │ ← final (locked)
 │       ↳ Selamat pagi semuanya, mari kita mulai rapatnya.                    │ ← translation (if enabled)
@@ -230,12 +230,16 @@ Notes for both engines:
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Control | What it does |
-|---|---|
-| **Translate → id** | Turns translation on/off at any time |
-| **Always on top** | Keeps the window above the meeting app, like subtitles |
-| **Save as…** | Saves a copy of the transcript elsewhere (`.md` or `.txt`) |
-| **Clear** | Clears *the screen only*. The transcript file stays intact |
+| Control | Shortcut | What it does |
+|---|---|---|
+| **Pause / Resume** | `Ctrl+P` | Stops transcribing until resumed, e.g. for an off-the-record chat. The sentence being spoken is locked first; audio during the pause is discarded, never transcribed |
+| **Summary** | `Ctrl+M` | Summarizes the meeting so far: summary, decisions, action items, open questions (see Step 8) |
+| **Translate → id** | `Ctrl+T` | Turns translation on/off at any time |
+| **Always on top** | | Keeps the window above the meeting app, like subtitles |
+| **Save as…** | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`) |
+| **Clear** | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
+
+Shortcuts work while the Live Caption window is focused. On macOS, use `Cmd` instead of `Ctrl`.
 
 How to read the text:
 - **Draft** (grey italics, starting with `…`): the sentence currently being spoken, updated about every 0.25 seconds. Words sometimes change slightly as the sentence grows. That's normal: Whisper refines its guess as it hears more context.
@@ -264,7 +268,41 @@ If you scroll up to read older text, new sentences and translations won't make t
 
 - **To close:** click the window's close button, or press `Ctrl+C` in the terminal. Since the transcript is saved continuously, nothing is lost when you close it.
 
-### Step 8 — Choosing a model for your VRAM
+### Step 8 — Meeting summary
+
+Press **Summary** (or `Ctrl+M`) at any time, usually at the end of the meeting. An AI model reads the final lines and writes:
+
+- **Summary**: what the meeting was about and what came out of it
+- **Decisions**
+- **Action items**: who does what, and by when
+- **Open questions**
+
+The summary opens in its own window (with a **Copy** button) and is added at the top of the transcript file. Press it again later to replace it with a summary of the longer meeting.
+
+There are two engines:
+
+**a) Ollama, local (default).** Nothing leaves your computer. Install [Ollama](https://ollama.com) once and download a model:
+
+```bash
+sudo pacman -S ollama            # Windows/macOS: installer from ollama.com
+sudo systemctl enable --now ollama
+ollama pull qwen2.5:3b           # ~2 GB, handles Indonesian and English
+```
+
+Then just run the app as usual. Pick another model with `--summary-model`, e.g. `--summary-model qwen2.5:7b` for better summaries if you have the RAM/VRAM (it takes a while on a GTX 1050 while Whisper is also loaded, so summarize after the meeting). Ollama on another machine: `--ollama-url http://192.168.1.10:11434`.
+
+**b) Claude API, online (opt-in).** Clearly better summaries, but **the whole transcript is sent to Anthropic**. Don't use it for confidential meetings.
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # or: ant auth login
+./run.sh --lang id --summarizer claude
+```
+
+The default model is `claude-opus-5-5`; change it with `--summary-model`. Each summary is billed to your API account (an hour-long meeting is roughly 15–20k input tokens).
+
+Summaries are written in the meeting's main language. Since speech-to-text makes mistakes and speakers aren't told apart (only **Me** vs **Participant**), check names and action items before sending the summary to others.
+
+### Step 9 — Choosing a model for your VRAM
 
 | GTX 1050 VRAM | Recommended model | Notes |
 |---|---|---|
@@ -302,11 +340,25 @@ If you scroll up to read older text, new sentences and translations won't make t
 # Most accurate (4 GB VRAM), offline translation to Indonesian
 ./run.sh --model medium --lang en --translate --translator argos
 
+# Names and jargon recognized better (see "Custom vocabulary")
+./run.sh --lang id --vocab "Anggi, Kubernetes, OKR, sprint review"
+
 # Most live (faster drafts, sentences lock sooner)
 ./run.sh --lang id --draft-model tiny --silence-ms 500
 ```
 
 See every option with `./run.sh --help`, or in the [Other options](#other-options) table.
+
+### Custom vocabulary
+
+Whisper often misspells people's names, product names and jargon it rarely hears. List them and Whisper will prefer them:
+
+```bash
+./run.sh --lang id --vocab "Anggi, Kubernetes, OKR"
+./run.sh --lang id --vocab-file ~/LiveCaption/vocab.txt
+```
+
+The file has one term per line; `#` starts a comment. Both options can be used together. Keep the list short (a few dozen terms at most): Whisper only reads a limited number of tokens, and a very long list makes it more likely to "hear" those words when nobody said them.
 
 ## Other options
 
@@ -320,6 +372,10 @@ See every option with `./run.sh --help`, or in the [Other options](#other-option
 | `--max-seconds 10` | Sentences longer than this are partially locked so drafts stay fast |
 | `--silence-ms 500` | Shorter pause, so sentences lock into final text sooner but get cut more often |
 | `--beam-size 3` | Better accuracy, slower |
+| `--summarizer claude` | Summaries via the Claude API instead of local Ollama (see Step 8). Sends the transcript to Anthropic |
+| `--summary-model <name>` | Model for summaries. Default `qwen2.5:3b` (Ollama) or `claude-opus-5-5` (Claude) |
+| `--ollama-url <url>` | Ollama server address (default `http://localhost:11434`) |
+| `--vocab "a, b"` / `--vocab-file <path>` | Names and terms Whisper should recognize (see [Custom vocabulary](#custom-vocabulary)) |
 | `--device cpu` | Force the CPU (a 9th-gen i7 can still handle the `small` model) |
 | `--monitor <name>` | Record a specific output only. Linux: monitor source name (`pactl list short sources`, pick one ending in `.monitor`). Windows: part of the speaker/headset name. macOS: part of the virtual device name (default `BlackHole`) |
 
@@ -371,11 +427,12 @@ The tests use only the Python standard library (`unittest`), so nothing extra ne
 .venv\Scripts\python -m unittest discover -s tests -v   # Windows
 ```
 
-They cover the audio pipeline (segmenting, re-chunking, resampling, recorder fallback), the transcriber's draft/final handling, translation skipping and the transcript format, without loading any Whisper model. Tests that record from real `parec` / `pw-record` run only on Linux, and are skipped when those commands aren't available.
+They are lightweight and finish in about a second: no Whisper model, no audio recording, no window and no internet. They cover the audio pipeline (segmenting, pause, re-chunking, resampling), the Whisper settings (`--vocab`, draft vs. final), translation skipping, the transcript format and the summary (against a fake local Ollama server; the Claude API is not called).
 
 ## Ethics and privacy
 
 - Let meeting participants know the conversation is being transcribed, especially at work.
 - Speech-to-text always runs **locally** on your computer. No audio leaves your machine.
 - Translation with the default `--translator google` **sends the text of every final sentence to Google**. For confidential meetings, use `--translator argos` (fully offline after the first language package download) or leave translation off.
+- Summaries with the default Ollama engine run **locally**. With `--summarizer claude`, **the whole transcript is sent to Anthropic** each time you press Summary.
 - Transcripts are saved as plain-text Markdown in `~/LiveCaption/`. Delete them when you no longer need them.

@@ -248,6 +248,8 @@ How to read the text:
 
 If you scroll up to read older text, new sentences and translations won't make the window jump back down. Scroll back to the bottom to follow the latest text again.
 
+The window's size, position and **Always on top** setting are remembered when you close it, and restored on the next run. If the saved position is off-screen (e.g. a monitor was unplugged), only the size is restored. `--geometry 760x280` overrides it for one run.
+
 ### Step 7 — Transcript and closing the app
 
 - The transcript is **saved automatically** whenever a new final line or translation arrives, to:
@@ -360,10 +362,43 @@ Whisper often misspells people's names, product names and jargon it rarely hears
 
 The file has one term per line; `#` starts a comment. Both options can be used together. Keep the list short (a few dozen terms at most): Whisper only reads a limited number of tokens, and a very long list makes it more likely to "hear" those words when nobody said them.
 
+### Saving your settings
+
+Instead of typing the same options every time, put them in a settings file once:
+
+```bash
+./run.sh --init-config     # writes config.toml with every option, commented out, at its default
+```
+
+| OS | Location |
+|---|---|
+| Linux / macOS | `~/.config/live-caption/config.toml` (or `$XDG_CONFIG_HOME/live-caption/`) |
+| Windows | `%APPDATA%\live-caption\config.toml` |
+
+Uncomment the lines you want and change their values. The keys are the command-line options without the leading `--`:
+
+```toml
+lang = "id"
+model = "medium"
+translate = true
+vocab-file = "~/LiveCaption/vocab.txt"
+summarizer = "ollama"
+```
+
+After that, a plain `./run.sh` uses these settings, and the window shows which file was loaded. Options typed on the command line always win for that run, e.g. `./run.sh --model small`. To turn off an option set to `true` in the file, use its `--no-` form: `./run.sh --no-translate`.
+
+- `vocab` also accepts a list: `vocab = ["Anggi", "Kubernetes", "OKR"]`.
+- An empty value (`monitor = ""`) means "not set", i.e. the default.
+- A mistake (unknown key, wrong value) stops the app with a message naming the file, so it never runs with settings you didn't intend.
+- Use another file for one run with `--config ~/work.toml`, e.g. one file per type of meeting.
+
 ## Other options
 
 | Option | What it does |
 |---|---|
+| `--config <path>` / `--init-config` | Use another settings file / write a fresh one (see [Saving your settings](#saving-your-settings)) |
+| `--no-translate` | Turn translation off when `translate = true` is in the settings file |
+| `--geometry 760x280+0+800` | Window size (and position) for this run, instead of the remembered one |
 | `--translate-to en` | Change the translation target language |
 | `--translator argos` | **Offline** translation (see Step 5b). Language packages are downloaded automatically on first use |
 | `--threshold 0.015` | Raise it if noise gets transcribed; lower it if quiet speech is missed |

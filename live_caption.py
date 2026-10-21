@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Live Caption — real-time speech-to-text for online meetings on Linux (PipeWire / PulseAudio).
+Live Caption — real-time speech-to-text for online meetings on Linux, Windows and macOS.
 
 Pipeline:
-  parec (system audio and/or mic)
+  AudioCapture (system audio and/or mic)
+      Linux: parec, falling back to pw-record · Windows: PyAudioWPatch (WASAPI loopback)
+      macOS: sounddevice (system audio through the BlackHole virtual device)
     -> Segmenter (draft every ~0.25 s while speaking + final on pause)
     -> AudioHub (finals are always processed, stale drafts are dropped so captions never fall behind)
     -> faster-whisper (STT, GPU via CUDA or CPU fallback; small model for drafts, main model for finals)
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import os
 import queue
 import shutil
 import subprocess
@@ -30,10 +33,14 @@ FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
 FRAME_BYTES = FRAME_SAMPLES * 2  # s16le mono
 
-# source name -> (PulseAudio/PipeWire device, on-screen label)
+IS_LINUX = sys.platform.startswith("linux")
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+# source name -> on-screen label
 SOURCES = {
-    "system": ("@DEFAULT_MONITOR@", "Participant"),  # audio coming out of the speakers/headset
-    "mic": ("@DEFAULT_SOURCE@", "Me"),               # default microphone
+    "system": "Participant",  # audio coming out of the speakers/headset
+    "mic": "Me",              # default microphone
 }
 
 # Phrases Whisper often "hallucinates" on short/near-silent audio (Indonesian and English output).
@@ -176,42 +183,191 @@ class Segmenter:
         self.last_draft_len = 0
 
 
-class AudioCapture(threading.Thread):
-    """Reads raw audio from `parec` (part of libpulse, runs on top of pipewire-pulse)."""
+class Resampler:
+    """Downmixes interleaved float32 audio to mono and resamples it to SAMPLE_RATE.
 
-    def __init__(self, device: str, segmenter: Segmenter, stop_event: threading.Event, report):
+    Uses PyAV, which is already installed as a faster-whisper dependency.
+    """
+
+    def __init__(self, rate: int, channels: int):
+        self.rate, self.channels = rate, channels
+        self._av = None
+        if rate != SAMPLE_RATE:
+            import av
+            self._av = av.AudioResampler(format="flt", layout="mono", rate=SAMPLE_RATE)
+
+    def __call__(self, block: np.ndarray) -> np.ndarray:
+        # Downmix ourselves: PyAV's own stereo -> mono mix boosts the level by ~3 dB.
+        mono = block.reshape(-1, self.channels).mean(axis=1, dtype=np.float32) if self.channels > 1 else block
+        if self._av is None:
+            return mono
+        import av
+        frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(mono).reshape(1, -1), format="flt", layout="mono")
+        frame.sample_rate = self.rate
+        out = [f.to_ndarray().reshape(-1) for f in self._av.resample(frame)]
+        return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
+
+class AudioCapture(threading.Thread):
+    """Records one source ("system" or "mic") and feeds it to its Segmenter.
+
+    Backends are tried in order: if one fails before delivering any audio (not installed,
+    no sound server, no device), the next one is used.
+    """
+
+    def __init__(self, source: str, device: str | None, segmenter: Segmenter,
+                 stop_event: threading.Event, report):
         super().__init__(daemon=True)
-        self.device = device
+        self.source = source
+        self.device = device  # --monitor: a specific output/loopback device for the "system" source
         self.segmenter = segmenter
         self.stop_event = stop_event
         self.report = report
         self.proc: subprocess.Popen | None = None
+        self._pending = np.zeros(0, dtype=np.float32)
+
+    def _backends(self):
+        if IS_WINDOWS:
+            return [("PyAudioWPatch", self._blocks_pyaudio)]
+        if IS_MAC:
+            return [("sounddevice", self._blocks_sounddevice)]
+        return [("parec", self._blocks_parec), ("pw-record", self._blocks_pw_record)]
 
     def run(self) -> None:
-        cmd = ["parec", f"--device={self.device}", "--format=s16le", f"--rate={SAMPLE_RATE}",
-               "--channels=1", "--raw", "--latency-msec=50"]
-        try:
-            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except FileNotFoundError:
-            self.report("parec not found (sudo pacman -S libpulse)")
-            return
-
-        assert self.proc.stdout is not None
-        while not self.stop_event.is_set():
-            data = self.proc.stdout.read(FRAME_BYTES)
-            if len(data) < FRAME_BYTES:
+        backends = self._backends()
+        for i, (name, blocks) in enumerate(backends):
+            started = False
+            try:
+                for block in blocks():
+                    started = True
+                    self._feed(block)
+                    if self.stop_event.is_set():
+                        break
                 break
-            frame = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-            self.segmenter.feed(frame)
+            except Exception as e:  # missing library/command, no sound server, no device, ...
+                if self.stop_event.is_set():
+                    break
+                if started or i == len(backends) - 1:
+                    self.report(f"Recording '{self.segmenter.label}' stopped ({name}): {e}")
+                    break
+                self.report(f"{name} unavailable ({e}), switching to {backends[i + 1][0]}", "info")
         self.segmenter.flush()
 
-        if not self.stop_event.is_set():
-            err = self.proc.stderr.read().decode(errors="ignore").strip() if self.proc.stderr else ""
-            self.report(f"Recording '{self.segmenter.label}' stopped: {err or 'parec exited'}")
+    def _feed(self, block: np.ndarray) -> None:
+        """Re-chunk blocks of any length into the FRAME_SAMPLES frames the Segmenter expects."""
+        buf = np.concatenate((self._pending, block)) if self._pending.size else block
+        n = len(buf) // FRAME_SAMPLES * FRAME_SAMPLES
+        for start in range(0, n, FRAME_SAMPLES):
+            self.segmenter.feed(buf[start:start + FRAME_SAMPLES])
+        self._pending = buf[n:]
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
+
+    # ---- Linux
+    def _blocks_subprocess(self, cmd: list[str]):
+        """Reads raw s16le mono audio at SAMPLE_RATE from a recorder command's stdout."""
+        proc = self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.stdout is not None and proc.stderr is not None
+        try:
+            while not self.stop_event.is_set():
+                data = proc.stdout.read(FRAME_BYTES)
+                if len(data) < FRAME_BYTES:
+                    break
+                yield np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+            if not self.stop_event.is_set():
+                err = proc.stderr.read().decode(errors="ignore").strip()
+                raise RuntimeError(err or f"{cmd[0]} exited")
+        finally:
+            # Always reap the recorder, also when it failed and the next backend takes over.
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+
+    def _blocks_parec(self):
+        # parec is part of libpulse and runs on top of PulseAudio or pipewire-pulse.
+        if self.source == "system":
+            device = self.device or "@DEFAULT_MONITOR@"
+        else:
+            device = "@DEFAULT_SOURCE@"
+        return self._blocks_subprocess(
+            ["parec", f"--device={device}", "--format=s16le", f"--rate={SAMPLE_RATE}",
+             "--channels=1", "--raw", "--latency-msec=50"])
+
+    def _blocks_pw_record(self):
+        # Native PipeWire recorder, for systems without parec or without pipewire-pulse.
+        cmd = ["pw-record", "--raw", "--format", "s16", "--rate", str(SAMPLE_RATE),
+               "--channels", "1", "--latency", "50ms"]
+        if self.source == "system":
+            cmd += ["-P", "stream.capture.sink=true"]  # record what a sink plays (its monitor)
+            if self.device:
+                # PulseAudio names monitors "<sink>.monitor"; PipeWire targets the sink itself.
+                cmd += ["--target", self.device.removesuffix(".monitor")]
+        return self._blocks_subprocess(cmd + ["-"])
+
+    # ---- Windows
+    def _blocks_pyaudio(self):
+        import pyaudiowpatch as pyaudio  # pyrefly: ignore[missing-import]  (installed on Windows only)
+
+        pa = pyaudio.PyAudio()
+        stream = None
+        try:
+            if self.source == "system":
+                if self.device:
+                    info = next((d for d in pa.get_loopback_device_info_generator()
+                                 if self.device.lower() in d["name"].lower()), None)
+                    if info is None:
+                        raise RuntimeError(f"no loopback device matching '{self.device}'")
+                else:
+                    info = pa.get_default_wasapi_loopback()  # loopback of the default speakers/headset
+            else:
+                info = pa.get_default_input_device_info()
+            rate = int(info["defaultSampleRate"])
+            channels = max(1, int(info["maxInputChannels"]))
+            chunk = rate * FRAME_MS // 1000
+            resample = Resampler(rate, channels)
+            stream = pa.open(format=pyaudio.paFloat32, channels=channels, rate=rate, input=True,
+                             input_device_index=info["index"], frames_per_buffer=chunk)
+            while not self.stop_event.is_set():
+                # WASAPI loopback delivers nothing while nothing is playing, so this read may block.
+                data = stream.read(chunk, exception_on_overflow=False)
+                yield resample(np.frombuffer(data, dtype=np.float32))
+        finally:
+            if stream is not None:
+                stream.close()
+            pa.terminate()
+
+    # ---- macOS
+    def _blocks_sounddevice(self):
+        import sounddevice as sd  # pyrefly: ignore[missing-import]  (installed on macOS only)
+
+        if self.source == "system":
+            # macOS has no built-in loopback: system audio comes from a virtual device such as BlackHole.
+            wanted = (self.device or "BlackHole").lower()
+            index = next((i for i, d in enumerate(sd.query_devices())
+                          if d["max_input_channels"] > 0 and wanted in d["name"].lower()), None)
+            if index is None:
+                raise RuntimeError(f"no input device matching '{self.device or 'BlackHole'}' "
+                                   "(install BlackHole, see README)")
+        else:
+            index = None  # default microphone
+        info = sd.query_devices(index, "input")
+        rate = int(info["default_samplerate"])
+        channels = min(2, int(info["max_input_channels"]))
+        chunk = rate * FRAME_MS // 1000
+        resample = Resampler(rate, channels)
+        with sd.InputStream(device=index, channels=channels, samplerate=rate,
+                            dtype="float32", blocksize=chunk) as stream:
+            while not self.stop_event.is_set():
+                data, _ = stream.read(chunk)
+                yield resample(data.reshape(-1))
 
 
 # --------------------------------------------------------------------------- translation
@@ -299,9 +455,10 @@ class Transcriber(threading.Thread):
         self.ui_q.put(("status", msg))
 
     def _load(self):
+        add_cuda_dll_dirs()
         from faster_whisper import WhisperModel
 
-        if self.args.device == "cpu":
+        if self.args.device == "cpu" or (IS_MAC and self.args.device == "auto"):  # CTranslate2 has no GPU support on macOS
             attempts = [("cpu", "int8")]
         elif self.args.device == "cuda":
             attempts = [("cuda", self.args.compute_type)]
@@ -344,8 +501,9 @@ class Transcriber(threading.Thread):
         models = self.args.model if draft_model is model else f"{self.args.model} + draft {self.args.draft_model}"
         ready = f"Ready — {models} @ {device.upper()} · language: {self.args.lang}"
         self._status(ready)
-        if device == "cpu" and self.args.device != "cpu":
-            self.ui_q.put(("error", "GPU unavailable, running on CPU (slower). Start the app with ./run.sh"))
+        if device == "cpu" and self.args.device != "cpu" and not IS_MAC:
+            launcher = "run.bat" if IS_WINDOWS else "./run.sh"
+            self.ui_q.put(("error", f"GPU unavailable, running on CPU (slower). Start the app with {launcher}"))
         lagging = False
         while not self.stop_event.is_set():
             item = self.hub.get(timeout=0.2)
@@ -384,6 +542,22 @@ class Transcriber(threading.Thread):
                     self.ui_q.put(("line", ts, label, text, info.language, seg_id))
             elif not useless:
                 self.ui_q.put(("draft", label, seg_id, text))
+
+
+def add_cuda_dll_dirs() -> None:
+    """Windows: make the cuBLAS/cuDNN DLLs from pip findable (run.sh does this on Linux via LD_LIBRARY_PATH)."""
+    # `sys.platform == "win32"` spelled out (not IS_WINDOWS) so type checkers know add_dll_directory exists.
+    if sys.platform == "win32":
+        try:
+            from nvidia import cublas, cudnn
+        except ImportError:
+            return
+        for pkg in (cublas, cudnn):
+            for base in pkg.__path__:
+                dll_dir = os.path.join(base, "bin")
+                if os.path.isdir(dll_dir):
+                    os.add_dll_directory(dll_dir)
+                    os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
 
 
 def make_transcribe_fn(beam_size: int):
@@ -471,6 +645,7 @@ class App:
         self.text.tag_configure("Me", foreground=self.COLORS["Me"], font=("Sans", args.font_size, "bold"))
         self.text.tag_configure("tr", foreground=self.COLORS["tr"], font=("Sans", args.font_size, "italic"))
         self.text.tag_configure("err", foreground=self.COLORS["err"])
+        self.text.tag_configure("info", foreground=self.COLORS["muted"], font=small)
         self.text.tag_configure("draft", foreground=self.COLORS["muted"], font=("Sans", args.font_size, "italic"))
         # Draft area = from the "draft" mark to the end of the text. Final lines are always inserted right before it.
         self.text.mark_set("draft", "end-1c")
@@ -488,6 +663,8 @@ class App:
                 elif kind == "error":
                     self.status.configure(text=msg[1], fg=self.COLORS["err"])
                     self._append([(f"⚠ {msg[1]}\n", "err")])
+                elif kind == "info":  # notice only (e.g. recorder fallback): keep the status line as it is
+                    self._append([(f"ℹ {msg[1]}\n", "info")])
                 elif kind == "line":
                     self._add_line(*msg[1:])
                 elif kind == "draft":
@@ -563,12 +740,14 @@ class App:
         rec["tr"] = translation
         mark = f"tr{line_id}"
         if line_id >= self.view_floor and mark in self.text.mark_names():
+            at_bottom = self.text.yview()[1] > 0.98
             self.text.configure(state="normal")
             self.text.mark_gravity("draft", "right")  # translations must not end up in the draft area
             self.text.insert(mark, f"      ↳ {translation}\n", "tr")
             self.text.mark_unset(mark)
             self.text.configure(state="disabled")
-            self.text.see("end")
+            if at_bottom:  # don't yank the view down while the user is reading older lines
+                self.text.see("end")
         self._autosave()
 
     # ---- buttons
@@ -624,7 +803,9 @@ def parse_args():
     p.add_argument("--source", default="system", choices=["system", "mic", "both"],
                    help="system = other participants, mic = your voice, both = both (use a headset)")
     p.add_argument("--monitor", default=None,
-                   help="A specific monitor source name (see: pactl list short sources). Default: active output")
+                   help="Record a specific output instead of the default one. Linux: monitor source name "
+                        "(pactl list short sources); Windows: part of the speaker/headset name; "
+                        "macOS: part of the virtual input name (default: BlackHole)")
     p.add_argument("--translate", action="store_true", help="Enable translation from the start")
     p.add_argument("--translate-to", default="id", help="Translation target language (default: id)")
     p.add_argument("--translator", default="google", choices=["google", "argos"],
@@ -650,8 +831,8 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
-    if shutil.which("parec") is None:
-        sys.exit("parec not found. Install it with: sudo pacman -S libpulse")
+    if IS_LINUX and not (shutil.which("parec") or shutil.which("pw-record")):
+        sys.exit("Neither parec nor pw-record was found. Install one with: sudo pacman -S libpulse (or pipewire)")
 
     import tkinter as tk
 
@@ -663,17 +844,14 @@ def main() -> None:
     translator = Translator(args.translate_to, args.translator)
     translator.enabled = args.translate
 
-    def report(msg: str) -> None:
-        ui_q.put(("error", msg))
+    def report(msg: str, kind: str = "error") -> None:
+        ui_q.put((kind, msg))
 
     names = ["system", "mic"] if args.source == "both" else [args.source]
     captures = []
     for name in names:
-        device, label = SOURCES[name]
-        if name == "system" and args.monitor:
-            device = args.monitor
-        seg = Segmenter(label, hub, args.threshold, args.silence_ms, args.max_seconds, args.draft_interval)
-        captures.append(AudioCapture(device, seg, stop, report))
+        seg = Segmenter(SOURCES[name], hub, args.threshold, args.silence_ms, args.max_seconds, args.draft_interval)
+        captures.append(AudioCapture(name, args.monitor if name == "system" else None, seg, stop, report))
 
     workers = [*captures, Transcriber(args, hub, ui_q, stop), TranslationWorker(translator, tr_q, ui_q, stop)]
 

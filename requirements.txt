@@ -1,8 +1,11 @@
 faster-whisper>=1.1
 numpy
-# CUDA libraries for the GPU (recent CTranslate2 needs CUDA 12 + cuDNN 9)
-nvidia-cublas-cu12
-nvidia-cudnn-cu12==9.*
+# CUDA libraries for NVIDIA GPUs on Linux/Windows (recent CTranslate2 needs CUDA 12 + cuDNN 9)
+nvidia-cublas-cu12; sys_platform != "darwin"
+nvidia-cudnn-cu12==9.*; sys_platform != "darwin"
+# Audio capture. Linux uses the parec / pw-record commands, so it needs nothing extra.
+PyAudioWPatch; sys_platform == "win32"   # Windows: WASAPI loopback
+sounddevice; sys_platform == "darwin"    # macOS: CoreAudio (system audio via BlackHole)
 # Online translation (lightweight)
 deep-translator
 # Offline translation (--translator argos). Large dependencies (pulls in torch & stanza)

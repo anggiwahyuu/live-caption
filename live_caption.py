@@ -72,9 +72,10 @@ class AudioHub:
         self._drafts: dict[str, tuple[int, np.ndarray]] = {}
         self._cv = threading.Condition()
 
-    def put_final(self, label: str, seg_id: int, audio: np.ndarray, ts: dt.datetime) -> None:
+    def put_final(self, label: str, seg_id: int, audio: np.ndarray, ts: dt.datetime,
+                  end: dt.datetime | None = None) -> None:
         with self._cv:
-            self._finals.append((label, seg_id, audio, ts))
+            self._finals.append((label, seg_id, audio, ts, end or ts))
             pending = self._drafts.get(label)
             if pending and pending[0] <= seg_id:
                 del self._drafts[label]  # the draft for this sentence is now stale
@@ -90,12 +91,12 @@ class AudioHub:
             if not self._finals and not self._drafts:
                 self._cv.wait(timeout)
             if self._finals:
-                label, seg_id, audio, ts = self._finals.popleft()
-                return "final", label, seg_id, audio, ts
+                label, seg_id, audio, ts, end = self._finals.popleft()
+                return "final", label, seg_id, audio, ts, end
             if self._drafts:
                 label = next(iter(self._drafts))  # take turns between sources (Participant/Me)
                 seg_id, audio = self._drafts.pop(label)
-                return "draft", label, seg_id, audio, None
+                return "draft", label, seg_id, audio, None, None
             return None
 
     def backlog(self) -> int:
@@ -131,6 +132,7 @@ class Segmenter:
         self.voiced = 0
         self.seg_id = 0
         self.seg_start: dt.datetime | None = None
+        self.start_len = 0  # frames in buf from before seg_start (the preroll)
         self.last_draft_len = 0
 
     def _is_speech(self, rms: float) -> bool:
@@ -160,6 +162,7 @@ class Segmenter:
                 self.silence_run = 0
                 self.voiced = self.speech_run
                 self.seg_start = dt.datetime.now()
+                self.start_len = len(self.buf)
                 self.last_draft_len = len(self.buf)
             return
 
@@ -187,9 +190,12 @@ class Segmenter:
 
     def _emit(self) -> None:
         if self.voiced >= self.min_voiced:
-            self.hub.put_final(self.label, self.seg_id, np.concatenate(self.buf),
-                               self.seg_start or dt.datetime.now())
+            start = self.seg_start or dt.datetime.now()
+            spoken = max(0, len(self.buf) - self.start_len - self.silence_run)  # frames until the speaker stopped
+            end = start + dt.timedelta(milliseconds=spoken * FRAME_MS)
+            self.hub.put_final(self.label, self.seg_id, np.concatenate(self.buf), start, end)
         self.seg_id += 1
+        self.start_len = 0
         self.buf = []
         self.silence_run = 0
         self.voiced = 0
@@ -522,7 +528,7 @@ class Transcriber(threading.Thread):
             item = self.hub.get(timeout=0.2)
             if item is None:
                 continue
-            kind, label, seg_id, audio, ts = item
+            kind, label, seg_id, audio, ts, end = item
             final = kind == "final"
 
             backlog = self.hub.backlog()
@@ -552,7 +558,7 @@ class Transcriber(threading.Thread):
                     self.ui_q.put(("drop", label, seg_id))  # remove its draft from the screen
                 else:
                     last_lang[label] = info.language
-                    self.ui_q.put(("line", ts, label, text, info.language, seg_id))
+                    self.ui_q.put(("line", ts, label, text, info.language, seg_id, end))
             elif not useless:
                 self.ui_q.put(("draft", label, seg_id, text))
 
@@ -717,6 +723,59 @@ class SummaryWorker(threading.Thread):
             self.ui_q.put(("summary", self.summarizer.summarize(self.transcript)))
         except Exception as e:
             self.ui_q.put(("summary_failed", str(e)))
+
+
+# --------------------------------------------------------------------------- subtitles
+
+MIN_CUE_SECONDS = 1.0  # shorter subtitles flash by too fast to read
+
+
+def subtitle_cues(records, origin: dt.datetime) -> list[tuple[float, float, str]]:
+    """(start, end, text) in seconds from `origin` (when the recording started), for SRT/VTT export."""
+    records = sorted(records, key=lambda r: r["ts"])
+    show_label = len({r["label"] for r in records}) > 1  # "Me:" / "Participant:" only when both speak
+    seconds = lambda t: (t - origin).total_seconds()  # noqa: E731
+    cues = []
+    for i, r in enumerate(records):
+        start = seconds(r["ts"])
+        end = max(seconds(r.get("end") or r["ts"]), start + MIN_CUE_SECONDS)
+        nxt = next((n for n in records[i + 1:] if n["label"] == r["label"]), None)
+        if nxt:  # don't overlap the same speaker's next sentence
+            end = min(end, max(seconds(nxt["ts"]), start + 0.5))
+        if end <= 0:
+            continue  # said before the recording started
+        text = f"{r['label']}: {r['text']}" if show_label else r["text"]
+        if r.get("tr"):
+            text += "\n" + r["tr"]
+        cues.append((max(0.0, start), end, text))
+    return cues
+
+
+def _cue_time(t: float, sep: str) -> str:
+    ms = round(t * 1000)
+    return f"{ms // 3_600_000:02d}:{ms // 60_000 % 60:02d}:{ms // 1000 % 60:02d}{sep}{ms % 1000:03d}"
+
+
+def to_srt(cues) -> str:
+    blocks = [f"{i}\n{_cue_time(a, ',')} --> {_cue_time(b, ',')}\n{text.replace('-->', '->')}"
+              for i, (a, b, text) in enumerate(cues, 1)]
+    return "\n\n".join(blocks) + "\n" if blocks else ""
+
+
+def to_vtt(cues) -> str:
+    def escape(text: str) -> str:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    blocks = [f"{_cue_time(a, '.')} --> {_cue_time(b, '.')}\n{escape(text)}" for a, b, text in cues]
+    return "WEBVTT\n\n" + "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def parse_clock(text: str, near: dt.datetime) -> dt.datetime | None:
+    """'14:02' or '14:02:15' -> the datetime with that clock time closest to `near` (handles midnight)."""
+    m = re.fullmatch(r"\s*(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?\s*", text or "")
+    if not m or int(m[1]) > 23 or int(m[2]) > 59 or int(m[3] or 0) > 59:
+        return None
+    t = near.replace(hour=int(m[1]), minute=int(m[2]), second=int(m[3] or 0), microsecond=0)
+    return min((t + dt.timedelta(days=d) for d in (-1, 0, 1)), key=lambda c: abs(c - near))
 
 
 # --------------------------------------------------------------------------- UI
@@ -929,10 +988,11 @@ class App:
         if at_bottom:
             self.text.see("end")
 
-    def _add_line(self, ts: dt.datetime, label: str, text: str, lang: str, seg_id: int) -> None:
+    def _add_line(self, ts: dt.datetime, label: str, text: str, lang: str, seg_id: int,
+                  end: dt.datetime | None = None) -> None:
         line_id = self.next_id
         self.next_id += 1
-        self.records[line_id] = {"ts": ts, "label": label, "text": text, "lang": lang, "tr": None}
+        self.records[line_id] = {"ts": ts, "end": end or ts, "label": label, "text": text, "lang": lang, "tr": None}
         self._append([(f"[{ts:%H:%M:%S}] ", "time"), (f"{label}: ", label), (f"{text}\n", None)],
                      mark=f"tr{line_id}")
         self._finish_draft(label, seg_id)
@@ -989,12 +1049,37 @@ class App:
         self._render_drafts()
 
     def _save_as(self) -> None:
-        from tkinter import filedialog
-        path = filedialog.asksaveasfilename(defaultextension=".md", initialfile=self.transcript_path.name,
-                                            filetypes=[("Markdown", "*.md"), ("Text", "*.txt")])
-        if path:
-            Path(path).write_text(self._render(), encoding="utf-8")
-            self._set_status(f"Saved: {path}", "muted", always=True)
+        from tkinter import filedialog, simpledialog
+        path = filedialog.asksaveasfilename(
+            defaultextension=".md", initialfile=self.transcript_path.name,
+            filetypes=[("Markdown", "*.md"), ("Text", "*.txt"),
+                       ("Subtitles (SubRip)", "*.srt"), ("Subtitles (WebVTT)", "*.vtt")])
+        if not path:
+            return
+        ext = Path(path).suffix.lower()
+        if ext in (".srt", ".vtt"):
+            answer = simpledialog.askstring(
+                "Recording start",
+                "What time did the recording start? (HH:MM or HH:MM:SS)\n"
+                "Subtitle times are counted from this moment.",
+                initialvalue=f"{self.started:%H:%M:%S}", parent=self.root)
+            if answer is None:
+                return
+            origin = parse_clock(answer, self.started)
+            if origin is None:
+                self._set_status(f"Not a valid time: {answer!r}. Use HH:MM or HH:MM:SS", "err", always=True)
+                return
+            cues = subtitle_cues(self.records.values(), origin)
+            content = to_srt(cues) if ext == ".srt" else to_vtt(cues)
+        else:
+            cues, content = None, self._render()
+        try:
+            Path(path).write_text(content, encoding="utf-8")
+        except OSError as e:
+            self._set_status(f"Failed to save: {e}", "err", always=True)
+            return
+        note = f" ({len(cues)} subtitles)" if cues is not None else ""
+        self._set_status(f"Saved: {path}{note}", "muted", always=True)
 
     # ---- summary
     def _summarize(self) -> None:

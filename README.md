@@ -236,7 +236,7 @@ Notes for both engines:
 | **Summary** | `Ctrl+M` | Summarizes the meeting so far: summary, decisions, action items, open questions (see Step 8) |
 | **Translate → id** | `Ctrl+T` | Turns translation on/off at any time |
 | **Always on top** | | Keeps the window above the meeting app, like subtitles |
-| **Save as…** | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`) |
+| **Save as…** | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
 | **Clear** | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
 
 Shortcuts work while the Live Caption window is focused. On macOS, use `Cmd` instead of `Ctrl`.
@@ -268,6 +268,16 @@ The window's size, position and **Always on top** setting are remembered when yo
     - _Selamat pagi semuanya, mari kita mulai rapatnya._
   ```
 
+- **Subtitles for a meeting recording:** if you recorded the meeting (Zoom/Meet recording, OBS, …), press **Save as…** and pick **SubRip (`.srt`)** or **WebVTT (`.vtt`)**. The app asks what time the recording started (pre-filled with the time Live Caption started); subtitle times are counted from that moment, and lines spoken before it are left out. Put the file next to the video with the same name (`meeting.mp4` + `meeting.srt`) and most players (VLC, mpv, YouTube upload) pick it up.
+
+  ```
+  1
+  00:00:05,000 --> 00:00:06,500
+  Participant: Good morning everyone.
+  Selamat pagi semuanya.
+  ```
+
+  The speaker label is only added when both **Me** and **Participant** were transcribed, and the translation (if any) becomes a second line. If the subtitles run consistently early or late, export again with the start time adjusted by that many seconds.
 - **To close:** click the window's close button, or press `Ctrl+C` in the terminal. Since the transcript is saved continuously, nothing is lost when you close it.
 
 ### Step 8 — Meeting summary

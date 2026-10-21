@@ -824,7 +824,7 @@ class App:
                 if kind == "status":
                     self._set_status(msg[1], "muted")
                 elif kind == "error":
-                    self._set_status(msg[1], "err")
+                    self._set_status(msg[1], "err", always=True)
                     self._append([(f"⚠ {msg[1]}\n", "err")])
                 elif kind == "info":  # notice only (e.g. recorder fallback): keep the status line as it is
                     self._append([(f"ℹ {msg[1]}\n", "info")])
@@ -841,15 +841,19 @@ class App:
                     self._show_summary(msg[1])
                 elif kind == "summary_failed":
                     self.summary_btn.configure(state="normal")
-                    self._set_status(f"Summary failed: {msg[1]}", "err")
+                    self._set_status(f"Summary failed: {msg[1]}", "err", always=True)
         except queue.Empty:
             pass
         self.root.after(30, self._poll)
 
-    def _set_status(self, text: str, color: str) -> None:
+    def _set_status(self, text: str, color: str, always: bool = False) -> None:
+        """Show a status message. While paused, only errors and replies to the user's own actions
+        (always=True) are shown, next to the pause notice; routine status updates wait for Resume."""
         self.last_status = (text, color)
-        if not self.paused.is_set():  # keep "Paused" visible until resumed
+        if not self.paused.is_set():
             self.status.configure(text=text, fg=self.COLORS[color])
+        elif always:
+            self.status.configure(text=f"⏸ Paused · {text}", fg=self.COLORS[color])
 
     def _append(self, parts, mark: str | None = None) -> None:
         """Insert final text right above the draft area."""
@@ -959,7 +963,7 @@ class App:
                                             filetypes=[("Markdown", "*.md"), ("Text", "*.txt")])
         if path:
             Path(path).write_text(self._render(), encoding="utf-8")
-            self.status.configure(text=f"Saved: {path}", fg=self.COLORS["muted"])
+            self._set_status(f"Saved: {path}", "muted", always=True)
 
     # ---- summary
     def _summarize(self) -> None:
@@ -967,17 +971,17 @@ class App:
             return  # a summary is already being made
         lines = [f"[{r['ts']:%H:%M:%S}] {r['label']}: {r['text']}" for r in self.records.values()]
         if not lines:
-            self._set_status("Nothing to summarize yet", "muted")
+            self._set_status("Nothing to summarize yet", "muted", always=True)
             return
         self.summary_btn.configure(state="disabled")
-        self._set_status(f"Summarizing {len(lines)} lines with {self.summarizer.describe()}…", "muted")
+        self._set_status(f"Summarizing {len(lines)} lines with {self.summarizer.describe()}…", "muted", always=True)
         SummaryWorker(self.summarizer, "\n".join(lines), self.ui_q).start()
 
     def _show_summary(self, text: str) -> None:
         tk = self.tk
         self.summary = (dt.datetime.now(), text)
         self.summary_btn.configure(state="normal")
-        self._set_status(f"Summary ready — saved in {self.transcript_path.name}", "muted")
+        self._set_status(f"Summary ready — saved in {self.transcript_path.name}", "muted", always=True)
         self._autosave()
 
         if self.summary_win is not None and self.summary_win.winfo_exists():
@@ -995,7 +999,7 @@ class App:
         def copy() -> None:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
-            self._set_status("Summary copied to the clipboard", "muted")
+            self._set_status("Summary copied to the clipboard", "muted", always=True)
 
         from tkinter import ttk
         ttk.Button(win, text="Copy", command=copy).pack(side="bottom", anchor="e", padx=8, pady=6)
@@ -1022,7 +1026,7 @@ class App:
         try:
             self.transcript_path.write_text(self._render(), encoding="utf-8")
         except OSError as e:
-            self.status.configure(text=f"Failed to save transcript: {e}", fg=self.COLORS["err"])
+            self._set_status(f"Failed to save transcript: {e}", "err", always=True)
 
 
 # --------------------------------------------------------------------------- main

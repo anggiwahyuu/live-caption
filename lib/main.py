@@ -6,17 +6,25 @@ import queue
 import shutil
 import sys
 import threading
+from pathlib import Path
 
 from .audio import AudioCapture, AudioHub, Segmenter
 from .common import IS_LINUX, SOURCES
-from .config import parse_args
+from .config import config_dir, parse_args
 from .summary import Summarizer
 from .transcriber import Transcriber
 from .translation import TranslationWorker, Translator
 from .ui import App
 
 
+ICON = Path(__file__).resolve().parent.parent / "assets" / "live-caption.png"
+
+
 def main() -> None:
+    if sys.stderr is None:  # pythonw, from the Windows Start menu shortcut: no console, so messages go to a log
+        log_dir = config_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        sys.stdout = sys.stderr = open(log_dir / "live-caption.log", "a", encoding="utf-8", buffering=1)
     args = parse_args()
     if IS_LINUX and not (shutil.which("parec") or shutil.which("pw-record")):
         sys.exit("Neither parec nor pw-record was found. Install parec with one of:\n"
@@ -47,7 +55,11 @@ def main() -> None:
 
     workers = [*captures, Transcriber(args, hub, ui_q, stop), TranslationWorker(translator, tr_q, ui_q, stop)]
 
-    root = tk.Tk()
+    root = tk.Tk(className="live-caption")  # the class the menu shortcut names (lib/shortcut.py), for the taskbar
+    try:
+        root.iconphoto(True, tk.PhotoImage(file=ICON))
+    except tk.TclError:
+        pass  # no icon is no reason not to start
 
     def shutdown() -> None:
         stop.set()

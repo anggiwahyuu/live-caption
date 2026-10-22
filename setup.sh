@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 RECREATE=0
+SHORTCUT=1
 PASS=()                # everything else goes to lib.model_setup (and from there to the app's own options)
 
 usage() {
@@ -16,6 +17,7 @@ Usage: ./setup.sh [options] [app options]
   --summary-only        Only (re)install the summary model
   --no-whisper          Don't download the Whisper models now (the app downloads them on its first start)
   -y, --yes             Answer every question with its default
+  --no-shortcut         Don't add Live Caption to the application menu
   --recreate-venv       Delete .venv and build it again
   -h, --help            Show this help
 
@@ -28,6 +30,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case $1 in
     --recreate-venv) RECREATE=1 ;;
+    --no-shortcut) SHORTCUT=0 ;;
     -h|--help) usage; exit 0 ;;
     *) PASS+=("$1") ;;
   esac
@@ -132,6 +135,14 @@ note "Installing the Python libraries (first time: about 1-2 GB)…"
 uv pip install --python "$PY" -r requirements.txt
 chmod +x run.sh
 
-# ---------------------------------------------------------------------------- 4. models
+# ---------------------------------------------------------------------------- 4. menu shortcut
+step "Application menu shortcut"
+if [[ $SHORTCUT == 1 ]]; then
+  "$PY" -m lib.shortcut || warn "No shortcut; start the app with ./run.sh instead."
+else
+  note "Skipped (--no-shortcut)"
+fi
+
+# ---------------------------------------------------------------------------- 5. models
 # Whisper and the summary model (Ollama is installed there when it's missing), with checks and retries.
 exec "$PY" -m lib.model_setup ${PASS[@]+"${PASS[@]}"}

@@ -40,6 +40,12 @@ jobs:
         run: |
           ./run.sh --help > /dev/null
           .venv/bin/python - <<< "$SMOKE"
+          if [[ $RUNNER_OS == macOS ]]; then
+            test -x ~/"Applications/Live Caption.app/Contents/MacOS/live-caption"
+            plutil -lint ~/"Applications/Live Caption.app/Contents/Info.plist"
+          else
+            test -f ~/.local/share/applications/live-caption.desktop
+          fi
 
   distros:
     # The other Linux families, each in its own container (as root, so setup.sh runs without sudo).
@@ -66,6 +72,7 @@ jobs:
       - name: App starts, Whisper runs
         run: |
           bash ./run.sh --help > /dev/null
+          test -f ~/.local/share/applications/live-caption.desktop
           .venv/bin/python - <<< "$SMOKE"
           # setup.sh must have used the distribution's Python (smooth fonts), not uv's own
           .venv/bin/python -c "import sys; assert '/uv/python/' not in sys.base_prefix, sys.base_prefix"
@@ -92,3 +99,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:SMOKE | .venv\Scripts\python.exe -  # via stdin: PowerShell 5.1 mangles quotes in arguments
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Live Caption.lnk")
+          if (-not (Test-Path $lnk.TargetPath)) { throw "Start menu shortcut points to a missing file: $($lnk.TargetPath)" }
+          "Shortcut: $($lnk.TargetPath) $($lnk.Arguments)"

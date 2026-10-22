@@ -34,8 +34,9 @@ What it does, skipping whatever is already there (so it's safe to run again):
 
 1. **System packages** (Linux/macOS only): the audio recorder, Tkinter and curl through your package manager (apt, dnf, pacman or zypper), or BlackHole through Homebrew on macOS. This asks for your password.
 2. **`uv` and the Python environment** (`.venv`). On Linux it's built on your distribution's Python, for smooth fonts (see [1.3](#13-python-environment)).
-3. **The Whisper models** the app will use (`small` + `base` for drafts, or whatever `config.toml` says), with a free disk space check and retries on network errors.
-4. **Meeting summaries, if you say yes:** installs [Ollama](https://ollama.com) when it's missing (it asks first and shows the command), downloads `qwen2.5:7b` (offers `qwen2.5:3b` on computers with less than 8 GB of RAM) and checks that it loads.
+3. **A shortcut in the application menu** (Linux: KDE, GNOME, XFCE, …; Windows: Start menu; macOS: `~/Applications/Live Caption.app`), so the app opens without a terminal. It starts with the settings in your [`config.toml`](#saving-your-settings), so put options like `lang = "id"` there.
+4. **The Whisper models** the app will use (`small` + `base` for drafts, or whatever `config.toml` says), with a free disk space check and retries on network errors.
+5. **Meeting summaries, if you say yes:** installs [Ollama](https://ollama.com) when it's missing (it asks first and shows the command), downloads `qwen2.5:7b` (offers `qwen2.5:3b` on computers with less than 8 GB of RAM) and checks that it loads.
 
 At the end it lists what's ready and, for anything that failed, the command that fixes it. Options (the same on Windows):
 
@@ -45,8 +46,11 @@ At the end it lists what's ready and, for anything that failed, the command that
 | `--summary-only` | Only add the summary model later |
 | `--no-whisper` | Don't download the Whisper models now (the app does it on its first start) |
 | `-y`, `--yes` | Answer every question with its default |
+| `--no-shortcut` | Don't add the app to the application menu |
 | `--recreate-venv` | Delete `.venv` and build it again |
 | app options | Pick other models, as with `./run.sh`: `--model medium`, `--summary-model qwen2.5:3b` |
+
+To remove the menu shortcut again: `.venv/bin/python -m lib.shortcut --remove` (Windows: `.venv\Scripts\python.exe -m lib.shortcut --remove`). Started from the menu, the app has no terminal for its messages: on Windows they go to `%APPDATA%\live-caption\live-caption.log`, on macOS to `~/Library/Logs/live-caption.log`; on Linux, start `./run.sh` in a terminal to see them.
 
 The NVIDIA driver isn't installed by the script (it needs a reboot and depends on your card): see [1.1](#11-nvidia-driver-only-with-an-nvidia-gpu) and [2](#2-installation-on-windows). On macOS, the Multi-Output Device still has to be created by hand ([section 3, step 2](#3-installation-on-macos)).
 
@@ -614,6 +618,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `summary.py` | Meeting summaries with Ollama or the Claude API |
 | `subtitles.py` | SRT / WebVTT export |
 | `ui.py` | The Tkinter window: captions, drafts, search, pause, summary window, transcript saving |
+| `shortcut.py` | The application menu shortcut of `setup.sh` / `setup.ps1` (`.desktop` file, Start menu, `.app`); the icon is in `assets/` |
 | `model_setup.py` | The model downloads of `setup.sh` / `setup.ps1`: Whisper, Ollama and the summary model, with checks and retries |
 
 Data flows one way: `audio` → `transcriber` → `ui` (→ `translation` / `summary` on demand). Modules talk through queues, so only `ui` touches Tkinter and only `main` knows all the pieces. A new feature usually means one new module plus a few lines in `ui.py`, `config.py` (its options) and `main.py` (to wire it in).

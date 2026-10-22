@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Live Caption: a speech bubble with two caption lines, in the app window's colors -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#0f1216"/>
+  <path d="M60 52h136a28 28 0 0 1 28 28v76a28 28 0 0 1-28 28h-82l-38 32v-32h-16a28 28 0 0 1-28-28V80a28 28 0 0 1 28-28z"
+        fill="#1b2027" stroke="#2f3742" stroke-width="4"/>
+  <rect x="64" y="92" width="128" height="18" rx="9" fill="#7dd3fc"/>
+  <rect x="64" y="126" width="88" height="18" rx="9" fill="#86efac"/>
+  <circle cx="184" cy="135" r="9" fill="#f87171"/>
+</svg>

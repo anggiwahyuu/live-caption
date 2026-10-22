@@ -4,12 +4,14 @@
 # Run it from PowerShell in the project folder:
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 [options]
 # The options are the same as setup.sh's (--summary, --no-summary, --summary-only, --no-whisper, --yes,
-# --recreate-venv) plus the app's own, e.g. --model medium or --summary-model qwen2.5:3b.
+# --recreate-venv, --no-shortcut) plus the app's own, e.g. --model medium or --summary-model qwen2.5:3b.
 # No param() block on purpose: Linux-style options like --model must reach Python unchanged.
 $recreate = $false
+$shortcut = $true
 $pass = @()
 foreach ($a in $args) {
     if ($a -in "--recreate-venv", "-RecreateVenv") { $recreate = $true }
+    elseif ($a -eq "--no-shortcut") { $shortcut = $false }
     elseif ($a -in "-h", "--help") {
         Get-Content $PSCommandPath -TotalCount 7 | Select-Object -Skip 1 | ForEach-Object { $_ -replace "^# ?", "" }
         exit 0
@@ -62,7 +64,16 @@ if (Test-Path $py) {
 Note "Installing the Python libraries (first time: about 1-2 GB)..."
 Run { uv pip install --python $py -r requirements.txt } "Installing the Python libraries"
 
-# ---------------------------------------------------------------------------- 3. models
+# ---------------------------------------------------------------------------- 3. Start menu shortcut
+Step "Start menu shortcut"
+if ($shortcut) {
+    & $py -m lib.shortcut
+    if ($LASTEXITCODE -ne 0) { Note "No shortcut; start the app with run.bat instead." }
+} else {
+    Note "Skipped (--no-shortcut)"
+}
+
+# ---------------------------------------------------------------------------- 4. models
 # Whisper and the summary model (Ollama is installed there with winget when it's missing), with checks and retries.
 $env:PYTHONUTF8 = "1"  # the result list uses check marks, which old console code pages lack
 & $py -m lib.model_setup @pass

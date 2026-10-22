@@ -2,23 +2,30 @@
 
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import queue
 import re
 import threading
 from pathlib import Path
 
-from .common import IS_MAC
+from .common import IS_LINUX, IS_MAC
 from .config import DEFAULT_GEOMETRY, load_window_state, restore_geometry, save_window_state
 from .subtitles import parse_clock, subtitle_cues, to_srt, to_vtt
 from .summary import Summarizer, SummaryWorker
 from .translation import Translator
 
+# First installed family wins; otherwise Tk's default UI font is used.
+UI_FONTS = ["Inter", "Noto Sans", "Cantarell", "Ubuntu", "Segoe UI", "SF Pro Text", "Helvetica Neue", "DejaVu Sans"]
+NEW_SPEAKER_GAP = dt.timedelta(minutes=2)  # same speaker after this long gets a new header (with its time)
+
 
 class App:
-    COLORS = {"bg": "#111418", "fg": "#e8eaed", "muted": "#8a919a",
-              "Participant": "#7dd3fc", "Me": "#86efac", "tr": "#fbbf24", "err": "#f87171",
-              "field": "#1f242b", "match": "#4a3f12", "match_cur": "#b45309"}
+    COLORS = {"bg": "#0f1216", "fg": "#e6e8eb", "muted": "#8b949e", "line": "#232931",
+              "field": "#1b2027", "hover": "#252c35", "press": "#2f3742",
+              "Participant": "#7dd3fc", "Me": "#86efac", "tr": "#fcd34d", "err": "#f87171",
+              "ok": "#4ade80", "warn": "#fbbf24", "accent": "#1e3a4c", "accent_fg": "#bae6fd",
+              "match": "#4a3f12", "match_cur": "#b45309"}
 
     def __init__(self, root, args, ui_q: queue.Queue, tr_q: queue.Queue, translator: Translator,
                  paused: threading.Event, summarizer: Summarizer, on_close):
@@ -32,23 +39,28 @@ class App:
         self.summary: tuple[dt.datetime, str] | None = None  # (when, Markdown) of the latest summary
         self.summary_win = None
         self.last_status = ("Starting…", "muted")  # restored when resuming from pause
+        self.ready = False                          # model loaded: the status dot turns green
         self.records: dict[int, dict] = {}
         self.next_id = 0
         self.view_floor = 0  # lines with id < this have been cleared from the screen
         self.drafts: dict[str, tuple[int, str]] = {}  # label -> (seg_id, temporary text)
         self.finalized: dict[str, int] = {}           # label -> next seg_id that may still be shown as a draft
+        self.last_speaker: str | None = None          # consecutive lines of one speaker share a header
+        self.last_ts: dt.datetime | None = None
 
         out_dir = Path(args.out_dir).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
         self.started = dt.datetime.now()
         self.transcript_path = out_dir / f"meeting-{self.started:%Y-%m-%d_%H%M}.md"
 
+        c = self.COLORS
         state = load_window_state() if args.geometry is None else {}
         root.title("Live Caption")
         geometry = args.geometry or restore_geometry(state.get("geometry"), root) or DEFAULT_GEOMETRY
         root.geometry(geometry)
+        root.minsize(420, 160)
         self._measure_frame_offset(geometry)
-        root.configure(bg=self.COLORS["bg"])
+        root.configure(bg=c["bg"])
         on_top = state.get("always_on_top", True) is not False
         root.attributes("-topmost", on_top)
         try:
@@ -61,55 +73,64 @@ class App:
             on_close()
         root.protocol("WM_DELETE_WINDOW", close)
 
-        bar = tk.Frame(root, bg=self.COLORS["bg"])
-        bar.pack(fill="x", padx=8, pady=(6, 0))
+        self._setup_fonts_and_style(tk, ttk)
+        mod_label = "Cmd" if IS_MAC else "Ctrl"
 
-        self.status = tk.Label(bar, text="Starting…", anchor="w", bg=self.COLORS["bg"], fg=self.COLORS["muted"])
-        self.status.pack(side="left", fill="x", expand=True)
+        # ---- header: ● status ............ [Pause] [Summary] [⋯]
+        header = tk.Frame(root, bg=c["bg"])
+        header.pack(fill="x", padx=10, pady=(8, 6))
+        self.menu_btn = ttk.Button(header, text="⋯", width=3, command=self._open_menu)
+        self.menu_btn.pack(side="right")
+        self.summary_btn = ttk.Button(header, text="✦  Summary", style="Accent.TButton", command=self._summarize)
+        self.summary_btn.pack(side="right", padx=(0, 6))
+        self.pause_btn = ttk.Button(header, text="⏸  Pause", command=self._toggle_pause)
+        self.pause_btn.pack(side="right", padx=(0, 6))
+        self.dot = tk.Label(header, text="●", bg=c["bg"], fg=c["muted"], font=self.f_ui)
+        self.dot.pack(side="left")
+        self.status = tk.Label(header, text="Starting…", anchor="w", bg=c["bg"], fg=c["muted"], font=self.f_ui)
+        self.status.pack(side="left", fill="x", expand=True, padx=(6, 10))
 
-        self.pause_btn = ttk.Button(bar, text="Pause", command=self._toggle_pause)
-        self.pause_btn.pack(side="left", padx=3)
-
+        # ---- the ⋯ menu: everything that isn't needed every minute
         self.tr_var = tk.BooleanVar(value=translator.enabled)
-        tk.Checkbutton(bar, text=f"Translate → {translator.target}", variable=self.tr_var,
-                       command=self._toggle_translate, bg=self.COLORS["bg"], fg=self.COLORS["fg"],
-                       selectcolor=self.COLORS["bg"], activebackground=self.COLORS["bg"],
-                       activeforeground=self.COLORS["fg"], highlightthickness=0).pack(side="left", padx=6)
-
         self.pin_var = tk.BooleanVar(value=on_top)
-        tk.Checkbutton(bar, text="Always on top", variable=self.pin_var,
-                       command=lambda: root.attributes("-topmost", self.pin_var.get()),
-                       bg=self.COLORS["bg"], fg=self.COLORS["fg"], selectcolor=self.COLORS["bg"],
-                       activebackground=self.COLORS["bg"], activeforeground=self.COLORS["fg"],
-                       highlightthickness=0).pack(side="left", padx=6)
+        self.menu = tk.Menu(root, tearoff=0, bg=c["field"], fg=c["fg"], activebackground=c["hover"],
+                            activeforeground=c["fg"], selectcolor=c["fg"], bd=0, relief="flat", font=self.f_ui)
+        self.menu.add_checkbutton(label=f"Translate → {translator.target}", variable=self.tr_var,
+                                  command=self._toggle_translate, accelerator=f"{mod_label}+T")
+        self.menu.add_checkbutton(label="Always on top", variable=self.pin_var, command=self._toggle_on_top)
+        self.menu.add_separator()
+        self.menu.add_command(label="Search…", command=self._open_search, accelerator=f"{mod_label}+F")
+        self.menu.add_command(label="Save as…", command=self._save_as, accelerator=f"{mod_label}+S")
+        self.menu.add_command(label="Clear screen", command=self._clear, accelerator=f"{mod_label}+L")
 
-        self.summary_btn = ttk.Button(bar, text="Summary", command=self._summarize)
-        self.summary_btn.pack(side="left", padx=3)
-        ttk.Button(bar, text="Save as…", command=self._save_as).pack(side="left", padx=3)
-        ttk.Button(bar, text="Clear", command=self._clear).pack(side="left", padx=3)
+        self.divider = tk.Frame(root, bg=c["line"], height=1)
+        self.divider.pack(fill="x")
+        self._build_search_bar(tk, ttk)  # shown with Ctrl+F, between the divider and the text
 
-        self._build_search_bar(tk, ttk)  # shown with Ctrl+F
-
-        body = self.body = tk.Frame(root, bg=self.COLORS["bg"])
-        body.pack(fill="both", expand=True, padx=8, pady=6)
-        self.text = tk.Text(body, wrap="word", bg=self.COLORS["bg"], fg=self.COLORS["fg"],
-                            insertbackground=self.COLORS["fg"], relief="flat", padx=8, pady=6,
-                            font=("Sans", args.font_size), state="disabled", highlightthickness=0)
+        body = self.body = tk.Frame(root, bg=c["bg"])
+        body.pack(fill="both", expand=True)
+        self.text = tk.Text(body, wrap="word", bg=c["bg"], fg=c["fg"], insertbackground=c["fg"], relief="flat",
+                            padx=14, pady=8, font=self.f_body, state="disabled", highlightthickness=0,
+                            selectbackground=c["press"], cursor="arrow")
         scroll = ttk.Scrollbar(body, command=self.text.yview)
         self.text.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.text.pack(side="left", fill="both", expand=True)
 
-        small = ("Sans", max(8, args.font_size - 3))
-        self.text.tag_configure("time", foreground=self.COLORS["muted"], font=small)
-        self.text.tag_configure("Participant", foreground=self.COLORS["Participant"], font=("Sans", args.font_size, "bold"))
-        self.text.tag_configure("Me", foreground=self.COLORS["Me"], font=("Sans", args.font_size, "bold"))
-        self.text.tag_configure("tr", foreground=self.COLORS["tr"], font=("Sans", args.font_size, "italic"))
-        self.text.tag_configure("err", foreground=self.COLORS["err"])
-        self.text.tag_configure("info", foreground=self.COLORS["muted"], font=small)
-        self.text.tag_configure("draft", foreground=self.COLORS["muted"], font=("Sans", args.font_size, "italic"))
-        self.text.tag_configure("match", background=self.COLORS["match"])
-        self.text.tag_configure("match_cur", background=self.COLORS["match_cur"], foreground="#ffffff")
+        indent = self.f_body_obj.measure("  ")
+        self.text.tag_configure("Participant", foreground=c["Participant"], font=self.f_bold, spacing1=10)
+        self.text.tag_configure("Me", foreground=c["Me"], font=self.f_bold, spacing1=10)
+        self.text.tag_configure("time", foreground=c["muted"], font=self.f_small)
+        self.text.tag_configure("body", lmargin1=indent, lmargin2=indent, spacing1=2)
+        self.text.tag_configure("tr", foreground=c["tr"], font=self.f_italic, lmargin1=indent, lmargin2=indent * 3,
+                                spacing1=1)
+        self.text.tag_configure("err", foreground=c["err"], font=self.f_small, spacing1=8)
+        self.text.tag_configure("info", foreground=c["muted"], font=self.f_small, spacing1=8)
+        self.text.tag_configure("draft_head", foreground=c["muted"], font=self.f_bold, spacing1=10)
+        self.text.tag_configure("draft", foreground=c["muted"], font=self.f_italic, lmargin1=indent, lmargin2=indent,
+                                spacing1=2)
+        self.text.tag_configure("match", background=c["match"])
+        self.text.tag_configure("match_cur", background=c["match_cur"], foreground="#ffffff")
         # Draft area = from the "draft" mark to the end of the text. Final lines are always inserted right before it.
         self.text.mark_set("draft", "end-1c")
 
@@ -126,8 +147,53 @@ class App:
         root.bind("<Escape>", lambda _e: self._close_search())
 
         if args._config_path:
-            self._append([(f"ℹ Settings loaded from {args._config_path}\n", "info")])
+            self._note(f"ℹ Settings loaded from {args._config_path}", "info")
+        if self.rough_fonts:
+            self._note("ℹ Text looks rough because this Python's Tk has no font smoothing (Xft). "
+                       "To fix it, recreate .venv with your distribution's Python: see README, step 1.3.", "info")
         root.after(30, self._poll)
+
+    def _setup_fonts_and_style(self, tk, ttk) -> None:
+        from tkinter import font as tkfont
+        c = self.COLORS
+        try:  # uv's standalone Python on Linux ships a Tk without Xft: only a bitmap "fixed" font
+            self.rough_fonts = IS_LINUX and self.root.tk.call("::tk::pkgconfig", "get", "fontsystem") != "xft"
+        except tk.TclError:
+            self.rough_fonts = False
+        families = set(tkfont.families(self.root))
+        family = next((f for f in UI_FONTS if f in families), tkfont.nametofont("TkDefaultFont").actual("family"))
+        size = self.args.font_size
+        self.f_body_obj = tkfont.Font(self.root, family=family, size=size)
+        self.f_body = (family, size)
+        self.f_bold = (family, size, "bold")
+        self.f_italic = (family, size, "italic")
+        self.f_small = (family, max(8, size - 3))
+        self.f_ui = (family, max(9, size - 2))
+
+        style = ttk.Style(self.root)
+        style.theme_use("clam")  # the only built-in theme whose colors can all be changed
+        style.configure("TButton", background=c["field"], foreground=c["fg"], bordercolor=c["field"],
+                        lightcolor=c["field"], darkcolor=c["field"], focuscolor=c["field"], borderwidth=0,
+                        padding=(10, 4), font=self.f_ui)
+        style.map("TButton",
+                  background=[("disabled", c["bg"]), ("pressed", c["press"]), ("active", c["hover"])],
+                  lightcolor=[("pressed", c["press"]), ("active", c["hover"])],
+                  darkcolor=[("pressed", c["press"]), ("active", c["hover"])],
+                  foreground=[("disabled", c["muted"])])
+        style.configure("Accent.TButton", background=c["accent"], foreground=c["accent_fg"],
+                        bordercolor=c["accent"], lightcolor=c["accent"], darkcolor=c["accent"])
+        style.map("Accent.TButton", background=[("disabled", c["bg"]), ("active", "#24485e")],
+                  lightcolor=[("active", "#24485e")], darkcolor=[("active", "#24485e")])
+        style.configure("Small.TButton", padding=(6, 2))
+        style.configure("Vertical.TScrollbar", background=c["field"], troughcolor=c["bg"], bordercolor=c["bg"],
+                        lightcolor=c["field"], darkcolor=c["field"], arrowcolor=c["muted"], gripcount=0)
+        style.map("Vertical.TScrollbar", background=[("active", c["hover"])])
+
+    def _open_menu(self) -> None:
+        self.menu.update_idletasks()
+        btn = self.menu_btn
+        x = btn.winfo_rootx() + btn.winfo_width() - self.menu.winfo_reqwidth()  # right-aligned under ⋯
+        self.menu.tk_popup(x, btn.winfo_rooty() + btn.winfo_height() + 2)
 
     # ---- window position
     def _measure_frame_offset(self, geometry: str) -> None:
@@ -159,9 +225,9 @@ class App:
                     self._set_status(msg[1], "muted")
                 elif kind == "error":
                     self._set_status(msg[1], "err", always=True)
-                    self._append([(f"⚠ {msg[1]}\n", "err")])
+                    self._note(f"⚠ {msg[1]}", "err")
                 elif kind == "info":  # notice only (e.g. recorder fallback): keep the status line as it is
-                    self._append([(f"ℹ {msg[1]}\n", "info")])
+                    self._note(f"ℹ {msg[1]}", "info")
                 elif kind == "line":
                     self._add_line(*msg[1:])
                 elif kind == "draft":
@@ -184,10 +250,24 @@ class App:
         """Show a status message. While paused, only errors and replies to the user's own actions
         (always=True) are shown, next to the pause notice; routine status updates wait for Resume."""
         self.last_status = (text, color)
+        if text.startswith("Ready"):
+            self.ready = True
         if not self.paused.is_set():
             self.status.configure(text=text, fg=self.COLORS[color])
+            self._update_dot(error=color == "err")
         elif always:
-            self.status.configure(text=f"⏸ Paused · {text}", fg=self.COLORS[color])
+            self.status.configure(text=f"Paused · {text}", fg=self.COLORS[color])
+
+    def _update_dot(self, error: bool = False) -> None:
+        """● red = error, amber = paused, green = listening, grey = still loading."""
+        c = self.COLORS
+        if self.paused.is_set():
+            color = c["warn"]
+        elif error:
+            color = c["err"]
+        else:
+            color = c["ok"] if self.ready else c["muted"]
+        self.dot.configure(fg=color)
 
     def _append(self, parts, mark: str | None = None) -> None:
         """Insert final text right above the draft area."""
@@ -209,6 +289,13 @@ class App:
             self.text.see("end")
         self._search_refresh()
 
+    def _note(self, text: str, tag: str) -> None:
+        """A notice line (info/error/pause). The next caption starts a new speaker header after it."""
+        self._append([(f"{text}\n", tag)])
+        self.last_speaker = None
+        if self.drafts:
+            self._render_drafts()  # a draft below the notice needs its speaker header back
+
     # ---- drafts (temporary text while someone is still speaking)
     def _set_draft(self, label: str, seg_id: int, text: str) -> None:
         if seg_id < self.finalized.get(label, 0):
@@ -228,7 +315,9 @@ class App:
         self.text.delete("draft", "end-1c")
         self.text.mark_gravity("draft", "left")  # drafts are written after the mark, the mark stays in front of them
         for label, (_, text) in self.drafts.items():
-            self.text.insert("end", f"… {label}: {text}\n", "draft")
+            if label != self.last_speaker:  # the same speaker carrying on needs no new header
+                self.text.insert("end", f"{label} …\n", "draft_head")
+            self.text.insert("end", f"{text}\n", "draft")
         self.text.configure(state="disabled")
         if at_bottom:
             self.text.see("end")
@@ -238,8 +327,12 @@ class App:
         line_id = self.next_id
         self.next_id += 1
         self.records[line_id] = {"ts": ts, "end": end or ts, "label": label, "text": text, "lang": lang, "tr": None}
-        self._append([(f"[{ts:%H:%M:%S}] ", "time"), (f"{label}: ", label), (f"{text}\n", None)],
-                     mark=f"tr{line_id}")
+        parts = []
+        if label != self.last_speaker or self.last_ts is None or ts - self.last_ts > NEW_SPEAKER_GAP:
+            parts += [(label, label), (f"   {ts:%H:%M:%S}\n", "time")]
+        parts.append((f"{text}\n", "body"))
+        self._append(parts, mark=f"tr{line_id}")
+        self.last_speaker, self.last_ts = label, ts
         self._finish_draft(label, seg_id)
         self._render_drafts()
         if self.translator.enabled:
@@ -256,7 +349,7 @@ class App:
             at_bottom = self.text.yview()[1] > 0.98
             self.text.configure(state="normal")
             self.text.mark_gravity("draft", "right")  # translations must not end up in the draft area
-            self.text.insert(mark, f"      ↳ {translation}\n", "tr")
+            self.text.insert(mark, f"↳ {translation}\n", "tr")
             self.text.mark_unset(mark)
             self.text.configure(state="disabled")
             if at_bottom:  # don't yank the view down while the user is reading older lines
@@ -271,13 +364,14 @@ class App:
         self.search_var = tk.StringVar()
         self.search_entry = tk.Entry(self.search_bar, textvariable=self.search_var, bg=c["field"], fg=c["fg"],
                                      insertbackground=c["fg"], relief="flat", highlightthickness=1,
-                                     highlightbackground=c["muted"], highlightcolor=c["Participant"])
-        self.search_entry.pack(side="left", fill="x", expand=True, ipady=2)
-        self.search_count = tk.Label(self.search_bar, text="", width=11, bg=c["bg"], fg=c["muted"])
+                                     highlightbackground=c["line"], highlightcolor=c["Participant"], font=self.f_ui)
+        self.search_entry.pack(side="left", fill="x", expand=True, ipady=3)
+        self.search_count = tk.Label(self.search_bar, text="", width=11, bg=c["bg"], fg=c["muted"], font=self.f_ui)
         self.search_count.pack(side="left", padx=6)
-        ttk.Button(self.search_bar, text="↑", width=3, command=lambda: self._search_step(-1)).pack(side="left")
-        ttk.Button(self.search_bar, text="↓", width=3, command=lambda: self._search_step(1)).pack(side="left", padx=3)
-        ttk.Button(self.search_bar, text="✕", width=3, command=self._close_search).pack(side="left")
+        for text, cmd in (("↑", lambda: self._search_step(-1)), ("↓", lambda: self._search_step(1)),
+                          ("✕", self._close_search)):
+            ttk.Button(self.search_bar, text=text, width=2, style="Small.TButton", command=cmd).pack(side="left",
+                                                                                                    padx=(0, 3))
         self.search_entry.bind("<Return>", lambda _e: self._search_step(1))
         self.search_entry.bind("<Shift-Return>", lambda _e: self._search_step(-1))
         self.search_entry.bind("<Escape>", lambda _e: (self._close_search(), "break")[1])
@@ -292,7 +386,7 @@ class App:
     def _open_search(self) -> None:
         if not self.search_visible:
             self.search_visible = True
-            self.search_bar.pack(fill="x", padx=8, pady=(6, 0), before=self.body)
+            self.search_bar.pack(fill="x", padx=10, pady=(8, 0), before=self.body)
         self.search_entry.focus_set()
         self.search_entry.select_range(0, "end")
         self._search_refresh(jump=True)
@@ -369,19 +463,26 @@ class App:
         self.tr_var.set(not self.tr_var.get())
         self._toggle_translate()
 
+    def _toggle_on_top(self) -> None:
+        self.root.attributes("-topmost", self.pin_var.get())
+        if self.summary_win is not None and self.summary_win.winfo_exists():
+            self.summary_win.attributes("-topmost", self.pin_var.get())
+
     def _toggle_pause(self) -> None:
         mod = "Cmd" if IS_MAC else "Ctrl"
         if self.paused.is_set():
             self.paused.clear()
-            self.pause_btn.configure(text="Pause")
+            self.pause_btn.configure(text="⏸  Pause")
             self.status.configure(text=self.last_status[0], fg=self.COLORS[self.last_status[1]])
-            self._append([(f"▶ Resumed at {dt.datetime.now():%H:%M:%S}\n", "info")])
+            self._update_dot(error=self.last_status[1] == "err")
+            self._note(f"▶ Resumed at {dt.datetime.now():%H:%M:%S}", "info")
         else:
             self.paused.set()
-            self.pause_btn.configure(text="Resume")
-            self.status.configure(text=f"⏸ Paused — nothing is being transcribed ({mod}+P to resume)",
-                                  fg=self.COLORS["tr"])
-            self._append([(f"⏸ Paused at {dt.datetime.now():%H:%M:%S}\n", "info")])
+            self.pause_btn.configure(text="▶  Resume")
+            self.status.configure(text=f"Paused — nothing is being transcribed ({mod}+P to resume)",
+                                  fg=self.COLORS["warn"])
+            self._update_dot()
+            self._note(f"⏸ Paused at {dt.datetime.now():%H:%M:%S}", "info")
 
     def _clear(self) -> None:
         self.text.configure(state="normal")
@@ -389,6 +490,7 @@ class App:
         self.text.mark_set("draft", "end-1c")
         self.text.configure(state="disabled")
         self.view_floor = self.next_id  # only the screen is cleared; the transcript file stays intact
+        self.last_speaker = None
         self._render_drafts()
         self._search_refresh()
 
@@ -433,12 +535,20 @@ class App:
         if not lines:
             self._set_status("Nothing to summarize yet", "muted", always=True)
             return
+        language = self.args.summary_lang
+        if language == "auto":  # the meeting's main language, weighted by how much was said in each
+            spoken = collections.Counter()
+            for r in self.records.values():
+                spoken[r["lang"]] += len(r["text"])
+            language = spoken.most_common(1)[0][0] if spoken else None
         self.summary_btn.configure(state="disabled")
         self._set_status(f"Summarizing {len(lines)} lines with {self.summarizer.describe()}…", "muted", always=True)
-        SummaryWorker(self.summarizer, "\n".join(lines), self.ui_q).start()
+        SummaryWorker(self.summarizer, "\n".join(lines), self.ui_q, language).start()
 
     def _show_summary(self, text: str) -> None:
         tk = self.tk
+        from tkinter import ttk
+        c = self.COLORS
         self.summary = (dt.datetime.now(), text)
         self.summary_btn.configure(state="normal")
         self._set_status(f"Summary ready — saved in {self.transcript_path.name}", "muted", always=True)
@@ -449,20 +559,37 @@ class App:
         win = self.summary_win = tk.Toplevel(self.root)
         win.title("Meeting summary")
         win.geometry("640x480")
-        win.configure(bg=self.COLORS["bg"])
+        win.configure(bg=c["bg"])
         win.attributes("-topmost", self.pin_var.get())
-        box = tk.Text(win, wrap="word", bg=self.COLORS["bg"], fg=self.COLORS["fg"], relief="flat",
-                      padx=10, pady=8, font=("Sans", self.args.font_size), highlightthickness=0)
-        box.insert("1.0", text)
-        box.configure(state="disabled")  # still selectable, so parts can be copied
 
         def copy() -> None:
             self.root.clipboard_clear()
-            self.root.clipboard_append(text)
+            self.root.clipboard_append(text)  # the Markdown as written, ready to paste into chat or a doc
             self._set_status("Summary copied to the clipboard", "muted", always=True)
 
-        from tkinter import ttk
-        ttk.Button(win, text="Copy", command=copy).pack(side="bottom", anchor="e", padx=8, pady=6)
+        buttons = tk.Frame(win, bg=c["bg"])
+        buttons.pack(side="bottom", fill="x", padx=12, pady=10)
+        ttk.Button(buttons, text="Close", command=win.destroy).pack(side="right")
+        ttk.Button(buttons, text="Copy", style="Accent.TButton", command=copy).pack(side="right", padx=(0, 6))
+        tk.Frame(win, bg=c["line"], height=1).pack(side="bottom", fill="x")
+
+        box = tk.Text(win, wrap="word", bg=c["bg"], fg=c["fg"], relief="flat", padx=18, pady=12,
+                      font=self.f_body, highlightthickness=0, selectbackground=c["press"])
+        box.tag_configure("heading", font=self.f_bold, foreground=c["Participant"], spacing1=12, spacing3=4)
+        box.tag_configure("bullet", lmargin1=8, lmargin2=24, spacing1=2)
+        box.tag_configure("none", lmargin1=8, foreground=c["muted"])
+        for line in text.splitlines():  # light Markdown: headings and bullets; the rest as is
+            if not line.strip():
+                continue  # headings already have space above them
+            if m := re.match(r"#{1,6}\s+(.*)", line):
+                box.insert("end", m[1] + "\n", "heading")
+            elif m := re.match(r"\s*[-*]\s+(.*)", line):
+                box.insert("end", f"•  {m[1]}\n", "bullet")
+            elif re.fullmatch(r"\s*[-*]\s*", line):  # the prompt writes "-" for an empty section
+                box.insert("end", "—\n", "none")
+            else:
+                box.insert("end", line + "\n")
+        box.configure(state="disabled")  # still selectable, so parts can be copied
         box.pack(fill="both", expand=True)
 
     # ---- transcript

@@ -172,7 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Engine for the Summary button. ollama = local & private (default), "
                         "claude = Claude API, better quality but the transcript is sent to Anthropic")
     p.add_argument("--summary-model", default=None,
-                   help="Model for summaries (default: qwen2.5:3b for ollama, claude-opus-5-5 for claude)")
+                   help="Model for summaries (default: qwen2.5:7b for ollama, claude-opus-5-5 for claude)")
+    p.add_argument("--summary-lang", default="auto",
+                   help="Language of the summary: auto = the meeting's main language (default), or a code like id, en")
     p.add_argument("--ollama-url", default="http://localhost:11434", help="Address of the Ollama server")
     p.add_argument("--font-size", type=int, default=13)
     p.add_argument("--opacity", type=float, default=0.93)

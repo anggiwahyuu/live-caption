@@ -107,14 +107,14 @@ Use the NVIDIA repository as described in the [openSUSE NVIDIA guide](https://en
 
 ### 1.2 System packages
 
-Two things are needed: the `parec` command to record audio, and `uv` to create the Python environment.
+Three things are needed: the `parec` command to record audio, Tkinter for the window, and `uv` to create the Python environment.
 
 | Family | Command |
 |---|---|
-| Debian/Ubuntu | `sudo apt install pulseaudio-utils curl` |
-| Fedora | `sudo dnf install pulseaudio-utils uv` |
+| Debian/Ubuntu | `sudo apt install pulseaudio-utils python3-tk curl` |
+| Fedora | `sudo dnf install pulseaudio-utils python3-tkinter uv` |
 | Arch / CachyOS | `sudo pacman -S --needed libpulse tk uv` |
-| openSUSE | `sudo zypper install pulseaudio-utils curl` |
+| openSUSE | `sudo zypper install pulseaudio-utils python3-tk curl` |
 
 Where `uv` isn't in the list above (Debian/Ubuntu, openSUSE, and any other distribution), install it with its official script, then **close and reopen the terminal** so the `uv` command is found:
 
@@ -126,18 +126,29 @@ About the audio packages:
 
 - `parec` (in `pulseaudio-utils`, or `libpulse` on Arch) works with both PulseAudio and PipeWire (through `pipewire-pulse`, which every desktop distribution with PipeWire includes).
 - If `parec` is missing or can't connect, the app automatically switches to `pw-record`, which comes with PipeWire. So on a PipeWire system this step is optional for audio, but installing `parec` is still recommended.
-- Tkinter (the window) is included in the Python that `uv` installs, so no `python3-tk` package is needed.
 
 ### 1.3 Python environment
 
-The same on every distribution. A separate **Python 3.12** is installed by `uv`: distributions ship either a newer Python that AI libraries don't have packages for yet (Arch, Fedora), or an older one (Debian, Ubuntu LTS). It doesn't touch your system Python.
+The same on every distribution. The environment is built on **your distribution's own Python** (3.10 or newer: Ubuntu 22.04 and later, Debian 12 and later, current Fedora, Arch and openSUSE all qualify). All the libraries have ready-made packages for Python 3.10 to 3.14. Installing into `.venv` doesn't touch your system Python.
 
 ```bash
 cd live-caption
-uv venv --python 3.12 .venv
+uv venv --python /usr/bin/python3 .venv
 uv pip install -r requirements.txt
 chmod +x run.sh
 ```
+
+Why the distribution's Python, not one downloaded by `uv` (`uv venv --python 3.12`)? On Linux, the Python that `uv` downloads comes with a Tk that has **no font smoothing**: the window can only use a small bitmap font, ignores `--font-size`, and can't show characters such as `↳`, `…` or `—`. The distribution's Tk (the `python3-tk` / `tk` package from step 1.2) uses your desktop's fonts. The app shows a notice in the window if it detects the rough fonts.
+
+Already set up the environment with `uv venv --python 3.12` before? Recreate it (your settings and transcripts are kept, they live outside the project folder):
+
+```bash
+rm -rf .venv
+uv venv --python /usr/bin/python3 .venv
+uv pip install -r requirements.txt
+```
+
+If your distribution's Python is older than 3.10, use `uv venv --python 3.12 .venv` instead: everything works, only the text looks rough.
 
 This downloads about 1–2 GB (faster-whisper and the CUDA libraries). Whisper models are downloaded automatically on first run, to `~/.cache/huggingface`.
 
@@ -267,7 +278,7 @@ If you know the meeting language, **set `--lang`**. Results are more stable and 
 
 ### Step 5 — Translation (optional)
 
-Turn translation on from the start with `--translate`, or at any time with the **"Translate → id"** checkbox in the window. There are two translation engines:
+Turn translation on from the start with `--translate`, or at any time with **Translate → id** in the window's `⋯` menu (or `Ctrl+T`). There are two translation engines:
 
 **a. Google (default): online and lightweight**
 
@@ -292,30 +303,32 @@ Requires an internet connection during the meeting. **Every final sentence is se
 Notes for both engines:
 - Only **final lines** are translated, not drafts.
 - Sentences already in the target language are not translated again.
-- Ticking the checkbox only affects *upcoming* sentences. Lines already on screen are not translated.
+- Turning it on only affects *upcoming* sentences. Lines already on screen are not translated.
 
 ### Step 6 — The window
 
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│ Ready — small + draft base @ CUDA    [✓] Translate → id  [✓] Always on top  │
-│                               [Pause]  [Summary]  [Save as…]  [Clear]       │
-├────────────────────────────────────────────────────────────────────────────┤
-│ [10:02:15] Participant: Good morning everyone, let's start the meeting.     │ ← final (locked)
-│       ↳ Selamat pagi semuanya, mari kita mulai rapatnya.                    │ ← translation (if enabled)
-│ … Participant: The first agenda today is                                   │ ← draft (still changing)
-└────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ ● Ready — small + draft base @ CUDA   [⏸ Pause] [✦ Summary] [⋯]│
+├──────────────────────────────────────────────────────────────┤
+│ Participant  10:02:15                                        │ ← speaker and time
+│   Good morning everyone, let's start the meeting.            │ ← final (locked)
+│   ↳ Selamat pagi semuanya, mari kita mulai rapatnya.         │ ← translation (if enabled)
+│   The first agenda today is                                  │ ← draft (grey italics, still changing)
+└──────────────────────────────────────────────────────────────┘
 ```
 
-| Control | Shortcut | What it does |
-|---|---|---|
-| **Pause / Resume** | `Ctrl+P` | Stops transcribing until resumed, e.g. for an off-the-record chat. The sentence being spoken is locked first; audio during the pause is discarded, never transcribed |
-| **Summary** | `Ctrl+M` | Summarizes the meeting so far: summary, decisions, action items, open questions (see Step 8) |
-| **Translate → id** | `Ctrl+T` | Turns translation on/off at any time |
-| **Always on top** | | Keeps the window above the meeting app, like subtitles |
-| **Save as…** | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
-| **Search** | `Ctrl+F` | Opens a search bar above the text (see below) |
-| **Clear** | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
+The dot shows the state at a glance: **green** listening, **amber** paused, **red** an error (read the message next to it), **grey** still loading the model. Consecutive sentences from the same speaker share one header; a new header (with its time) appears when the speaker changes or after a 2-minute gap.
+
+| Control | Where | Shortcut | What it does |
+|---|---|---|---|
+| **Pause / Resume** | button | `Ctrl+P` | Stops transcribing until resumed, e.g. for an off-the-record chat. The sentence being spoken is locked first; audio during the pause is discarded, never transcribed |
+| **Summary** | button | `Ctrl+M` | Summarizes the meeting so far: summary, decisions, action items, open questions (see Step 8) |
+| **Translate → id** | `⋯` menu | `Ctrl+T` | Turns translation on/off at any time |
+| **Always on top** | `⋯` menu | | Keeps the window above the meeting app, like subtitles |
+| **Search…** | `⋯` menu | `Ctrl+F` | Opens a search bar above the text (see below) |
+| **Save as…** | `⋯` menu | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
+| **Clear screen** | `⋯` menu | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
 
 Shortcuts work while the Live Caption window is focused. On macOS, use `Cmd` instead of `Ctrl`.
 
@@ -326,7 +339,7 @@ How to read the text:
 
 If you scroll up to read older text, new sentences and translations won't make the window jump back down. Scroll back to the bottom to follow the latest text again.
 
-**Searching:** press `Ctrl+F` and type, e.g. `deadline`. Every match is highlighted (upper/lower case doesn't matter) and the newest one is selected, since you're usually looking for something said recently. `Enter` / `F3` goes to the next match, `Shift+Enter` / `Shift+F3` to the previous one; the counter shows e.g. `2 / 5`. New lines that arrive while the search is open are highlighted too, and the view stays where you are. Draft text is not searched, because it is still changing. Only the text on screen is searched: after **Clear**, earlier lines are only in the transcript file. `Esc` closes the search and jumps back to the live captions.
+**Searching:** press `Ctrl+F` and type, e.g. `deadline`. Every match is highlighted (upper/lower case doesn't matter) and the newest one is selected, since you're usually looking for something said recently. `Enter` / `F3` goes to the next match, `Shift+Enter` / `Shift+F3` to the previous one; the counter shows e.g. `2 / 5`. New lines that arrive while the search is open are highlighted too, and the view stays where you are. Draft text is not searched, because it is still changing. Only the text on screen is searched: after **Clear screen**, earlier lines are only in the transcript file. `Esc` closes the search and jumps back to the live captions.
 
 The window's size, position and **Always on top** setting are remembered when you close it, and restored on the next run. If the saved position is off-screen (e.g. a monitor was unplugged), only the size is restored. `--geometry 760x280` overrides it for one run.
 
@@ -348,7 +361,7 @@ The window's size, position and **Always on top** setting are remembered when yo
     - _Selamat pagi semuanya, mari kita mulai rapatnya._
   ```
 
-- **Subtitles for a meeting recording:** if you recorded the meeting (Zoom/Meet recording, OBS, …), press **Save as…** and pick **SubRip (`.srt`)** or **WebVTT (`.vtt`)**. The app asks what time the recording started (pre-filled with the time Live Caption started); subtitle times are counted from that moment, and lines spoken before it are left out. Put the file next to the video with the same name (`meeting.mp4` + `meeting.srt`) and most players (VLC, mpv, YouTube upload) pick it up.
+- **Subtitles for a meeting recording:** if you recorded the meeting (Zoom/Meet recording, OBS, …), choose **Save as…** in the `⋯` menu (or `Ctrl+S`) and pick **SubRip (`.srt`)** or **WebVTT (`.vtt`)**. The app asks what time the recording started (pre-filled with the time Live Caption started); subtitle times are counted from that moment, and lines spoken before it are left out. Put the file next to the video with the same name (`meeting.mp4` + `meeting.srt`) and most players (VLC, mpv, YouTube upload) pick it up.
 
   ```
   1
@@ -378,10 +391,20 @@ There are two engines:
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh   # any Linux distribution; Windows/macOS: installer from ollama.com
 # (Arch/CachyOS alternative: sudo pacman -S ollama && sudo systemctl enable --now ollama)
-ollama pull qwen2.5:3b           # ~2 GB, handles Indonesian and English
+ollama pull qwen2.5:7b           # ~4.7 GB, handles Indonesian and English
 ```
 
-Then just run the app as usual. Pick another model with `--summary-model`, e.g. `--summary-model qwen2.5:7b` for better summaries if you have the RAM/VRAM (it takes a while on a GTX 1050 while Whisper is also loaded, so summarize after the meeting). Ollama on another machine: `--ollama-url http://192.168.1.10:11434`.
+Then just run the app as usual. On the CPU (recommended with a small GPU like the GTX 1050, so Whisper keeps its VRAM) a summary takes about **2 minutes** and needs about **5 GB of free RAM**; the window stays usable meanwhile.
+
+Small local models tend to make things up (a date nobody said, the wrong person for a task) and to list proposals as decisions. So with Ollama the summary is made in two passes, and the app checks the model's work in between:
+
+1. The model lists the decisions, action items and open questions as structured data, each with a **word-for-word quote** from the transcript.
+2. The app checks every item against the transcript: items whose quote isn't in the transcript are dropped; a deadline is kept only if its words (and always its day, month or number) were said near the quote; a person's name only if it was said there (otherwise the item gets the label of who said the quoted line).
+3. The model writes the short overview from the checked items only.
+
+Something said in the meeting can still be missed, so read the summary before sharing it.
+
+Less than 8 GB of RAM? Use the smaller model: `ollama pull qwen2.5:3b` and `--summary-model qwen2.5:3b` (twice as fast, 2 GB). Be aware it's noticeably less reliable: in our test on an Indonesian sprint meeting it listed proposals as decisions and dropped an action item, while `qwen2.5:7b` got all decisions, action items and open questions right. Ollama on another machine: `--ollama-url http://192.168.1.10:11434`.
 
 **b) Claude API, online (opt-in).** Clearly better summaries, but **the whole transcript is sent to Anthropic**. Don't use it for confidential meetings.
 
@@ -392,7 +415,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # or: ant auth login
 
 The default model is `claude-opus-5-5`; change it with `--summary-model`. Each summary is billed to your API account (an hour-long meeting is roughly 15–20k input tokens).
 
-Summaries are written in the meeting's main language. Since speech-to-text makes mistakes and speakers aren't told apart (only **Me** vs **Participant**), check names and action items before sending the summary to others.
+Summaries are written in the meeting's main language (the one Whisper detected for most of the speech). For an English meeting summarized in Indonesian, use `--summary-lang id` (or `summary-lang = "id"` in `config.toml`). Since speech-to-text makes mistakes and speakers aren't told apart (only **Me** vs **Participant**), check names and action items before sending the summary to others.
 
 ### Step 9 — Choosing a model for your VRAM
 
@@ -498,7 +521,8 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `--silence-ms 500` | Shorter pause, so sentences lock into final text sooner but get cut more often |
 | `--beam-size 3` | Better accuracy, slower |
 | `--summarizer claude` | Summaries via the Claude API instead of local Ollama (see Step 8). Sends the transcript to Anthropic |
-| `--summary-model <name>` | Model for summaries. Default `qwen2.5:3b` (Ollama) or `claude-opus-5-5` (Claude) |
+| `--summary-lang id` | Language of the summary. Default `auto`: the meeting's main language |
+| `--summary-model <name>` | Model for summaries. Default `qwen2.5:7b` (Ollama; `qwen2.5:3b` for less than 8 GB of RAM) or `claude-opus-5-5` (Claude) |
 | `--ollama-url <url>` | Ollama server address (default `http://localhost:11434`) |
 | `--vocab "a, b"` / `--vocab-file <path>` | Names and terms Whisper should recognize (see [Custom vocabulary](#custom-vocabulary)) |
 | `--device cpu` | Force the CPU (a 9th-gen i7 can still handle the `small` model) |

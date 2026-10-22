@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import alerts
 from .common import IS_LINUX, IS_MAC
 from .config import DEFAULT_GEOMETRY, load_window_state, restore_geometry, save_window_state
 from .subtitles import parse_clock, subtitle_cues, to_srt, to_vtt
@@ -21,6 +22,7 @@ from .translation import Translator
 UI_FONTS = ["Inter", "Noto Sans", "Cantarell", "Ubuntu", "Segoe UI", "SF Pro Text", "Helvetica Neue", "DejaVu Sans"]
 NEW_SPEAKER_GAP = dt.timedelta(minutes=2)  # same speaker after this long gets a new header (with its time)
 AUTO_SUMMARY_MIN_LINES = 5  # fewer new lines than this aren't worth an automatic summary
+ALERT_COOLDOWN = 20  # seconds: at most one desktop notification in this time, however often the word comes
 
 
 class App:
@@ -28,7 +30,7 @@ class App:
               "field": "#1b2027", "hover": "#252c35", "press": "#2f3742",
               "Participant": "#7dd3fc", "Me": "#86efac", "tr": "#fcd34d", "err": "#f87171",
               "ok": "#4ade80", "warn": "#fbbf24", "accent": "#1e3a4c", "accent_fg": "#bae6fd",
-              "match": "#4a3f12", "match_cur": "#b45309"}
+              "match": "#4a3f12", "match_cur": "#b45309", "alert": "#7c2d12"}
 
     def __init__(self, root, args, ui_q: queue.Queue, tr_q: queue.Queue, translator: Translator,
                  paused: threading.Event, summarizer: Summarizer, on_close):
@@ -45,6 +47,9 @@ class App:
         self.last_line_at = time.monotonic()    # for the automatic summary after a silence
         self.closing = False                    # the window was closed; it goes once the last summary is done
         self.on_close = on_close
+        self.alert_words = alerts.parse_words(args.alert)
+        self.alert_re = alerts.compile_words(self.alert_words)
+        self.last_alert_at = float("-inf")      # when the last desktop notification was shown
         self.last_status = ("Starting…", "muted")  # restored when resuming from pause
         self.ready = False                          # model loaded: the status dot turns green
         self.records: dict[int, dict] = {}
@@ -77,7 +82,7 @@ class App:
 
         def close() -> None:
             save_window_state({"geometry": self._window_geometry(), "always_on_top": self.pin_var.get(),
-                               "auto_summary": self.auto_var.get()})
+                               "auto_summary": self.auto_var.get(), "alert_words": self.alert_words})
             if not self._summary_before_close():
                 on_close()
         root.protocol("WM_DELETE_WINDOW", close)
@@ -111,6 +116,7 @@ class App:
         self.menu.add_checkbutton(label="Always on top", variable=self.pin_var, command=self._toggle_on_top)
         self.menu.add_checkbutton(label=f"Auto summary (after {args.auto_summary_after:g} min of silence)",
                                   variable=self.auto_var, command=self._toggle_auto_summary)
+        self.menu.add_command(label="Alert words…", command=self._edit_alert_words)
         self.menu.add_separator()
         self.menu.add_command(label="Search…", command=self._open_search, accelerator=f"{mod_label}+F")
         self.menu.add_command(label="Save as…", command=self._save_as, accelerator=f"{mod_label}+S")
@@ -142,6 +148,9 @@ class App:
         self.text.tag_configure("draft_head", foreground=c["muted"], font=self.f_bold, spacing1=10)
         self.text.tag_configure("draft", foreground=c["muted"], font=self.f_italic, lmargin1=indent, lmargin2=indent,
                                 spacing1=2)
+        # lmargincolor: a word at the start of a line would otherwise color the indent in front of it too
+        self.text.tag_configure("alert", background=c["alert"], foreground="#ffffff", font=self.f_bold,
+                                lmargincolor=c["bg"])
         self.text.tag_configure("match", background=c["match"])
         self.text.tag_configure("match_cur", background=c["match_cur"], foreground="#ffffff")
         # Draft area = from the "draft" mark to the end of the text. Final lines are always inserted right before it.
@@ -161,6 +170,8 @@ class App:
 
         if args._config_path:
             self._note(f"ℹ Settings loaded from {args._config_path}", "info")
+        if self.alert_words:
+            self._note(f"ℹ Alert words: {', '.join(self.alert_words)}", "info")
         if self.rough_fonts:
             self._note("ℹ Text looks rough because this Python's Tk has no font smoothing (Xft). "
                        "To fix it, recreate .venv with your distribution's Python: see README, step 1.3.", "info")
@@ -348,10 +359,17 @@ class App:
         parts = []
         if label != self.last_speaker or self.last_ts is None or ts - self.last_ts > NEW_SPEAKER_GAP:
             parts += [(label, label), (f"   {ts:%H:%M:%S}\n", "time")]
-        parts.append((f"{text}\n", "body"))
+        spans = alerts.find(self.alert_re, text) if label != "Me" else []  # your own voice saying your name: no alert
+        pos = 0
+        for start, end in spans:  # the alert words highlighted inside the line
+            parts += [(text[pos:start], "body"), (text[start:end], ("body", "alert"))]
+            pos = end
+        parts.append((f"{text[pos:]}\n", "body"))
         self._append(parts, mark=f"tr{line_id}")
         self.last_speaker, self.last_ts = label, ts
         self.last_line_at = time.monotonic()
+        if spans:
+            self._alert(ts, label, text, text[spans[0][0]:spans[0][1]])
         self._finish_draft(label, seg_id)
         self._render_drafts()
         if self.translator.enabled:
@@ -486,6 +504,34 @@ class App:
         self.root.attributes("-topmost", self.pin_var.get())
         if self.summary_win is not None and self.summary_win.winfo_exists():
             self.summary_win.attributes("-topmost", self.pin_var.get())
+
+    # ---- alert words
+    def _alert(self, ts: dt.datetime, label: str, text: str, word: str) -> None:
+        self._set_status(f"⚑ \u201c{word}\u201d said at {ts:%H:%M:%S}", "warn", always=True)
+        if self.root.focus_displayof() is not None:
+            return  # the window is in front: the highlight is enough
+        if time.monotonic() - self.last_alert_at < ALERT_COOLDOWN:
+            return
+        self.last_alert_at = time.monotonic()
+        body = text if len(text) <= 200 else text[:197] + "…"
+        alerts.notify(f"\u201c{word}\u201d \u2014 {label}, {ts:%H:%M}", body)
+
+    def _edit_alert_words(self) -> None:
+        from tkinter import simpledialog
+        answer = simpledialog.askstring(
+            "Alert words",
+            "Words to watch for, separated by commas (e.g. your name).\n"
+            "When someone else says one, it is highlighted and a desktop notification appears.\n"
+            "Leave it empty to turn alerts off.",
+            initialvalue=", ".join(self.alert_words), parent=self.root)
+        if answer is None:
+            return
+        self.alert_words = alerts.parse_words(answer)
+        self.alert_re = alerts.compile_words(self.alert_words)
+        if self.alert_words:
+            self._set_status(f"Alert words: {', '.join(self.alert_words)}", "muted", always=True)
+        else:
+            self._set_status("Alerts off", "muted", always=True)
 
     def _toggle_auto_summary(self) -> None:
         if self.auto_var.get():

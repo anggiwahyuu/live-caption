@@ -152,8 +152,9 @@ def make_transcribe_fn(beam_size: int, hotwords: str | None = None):
 
 
 def load_vocab(args) -> str | None:
-    """--vocab "a, b" and/or --vocab-file (one term per line, # = comment) -> one hotwords string."""
-    terms = [t.strip() for t in (args.vocab or "").split(",")]
+    """--vocab "a, b" and/or --vocab-file (one term per line, # = comment) -> one hotwords string.
+    The --alert words are added too: a name has to be spelled right to be noticed."""
+    terms = [t.strip() for t in (args.vocab or "").split(",") + (getattr(args, "alert", None) or "").split(",")]
     if args.vocab_file:
         path = Path(args.vocab_file).expanduser()
         try:

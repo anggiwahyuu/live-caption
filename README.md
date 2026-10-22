@@ -363,6 +363,7 @@ The dot shows the state at a glance: **green** listening, **amber** paused, **re
 | **Translate → id** | `⋯` menu | `Ctrl+T` | Turns translation on/off at any time |
 | **Always on top** | `⋯` menu | | Keeps the window above the meeting app, like subtitles |
 | **Auto summary** | `⋯` menu | | Makes the summary by itself after a silence and when you close the window ([Step 8](#step-8--meeting-summary)) |
+| **Alert words…** | `⋯` menu | | Tells you when someone says your name ([Alert words](#alert-words)) |
 | **Search…** | `⋯` menu | `Ctrl+F` | Opens a search bar above the text (see below) |
 | **Save as…** | `⋯` menu | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
 | **Clear screen** | `⋯` menu | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
@@ -519,6 +520,17 @@ Whisper often misspells people's names, product names and jargon it rarely hears
 
 The file has one term per line; `#` starts a comment. Both options can be used together. Keep the list short (a few dozen terms at most): Whisper only reads a limited number of tokens, and a very long list makes it more likely to "hear" those words when nobody said them.
 
+### Alert words
+
+Following a long meeting with half an eye? Let the app watch for your name. Open `⋯` → **Alert words…** and type the words, separated by commas, e.g. `Anggi, backend team`. When someone else says one:
+
+- the word is **highlighted** in the captions and the status line says when it was said;
+- a **desktop notification** appears with the whole sentence (Linux: through `notify-send`, which every desktop has; macOS: Notification Center; Windows: a notification from Windows PowerShell). It's skipped while the Live Caption window is in front, as the highlight is enough then, and comes at most once every 20 seconds.
+
+Words match whole and in any case: `Anggi` also catches `anggi,` but not `Anggia`. Your own microphone ("Me" lines) never triggers an alert. The words are remembered for the next meeting, and from then on they're also passed to Whisper as [vocabulary](#custom-vocabulary), so a name is spelled right more often. Clear the box to turn alerts off.
+
+From the command line or `config.toml`: `--alert "Anggi, backend team"` or `alert = ["Anggi", "backend team"]`.
+
 ### Saving your settings
 
 Instead of typing the same options every time, put them in a settings file once:
@@ -625,6 +637,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `translation.py` | Google / Argos translation of final lines |
 | `summary.py` | Meeting summaries with Ollama or the Claude API |
 | `subtitles.py` | SRT / WebVTT export |
+| `alerts.py` | Alert words: matching them in a line, desktop notifications on each OS |
 | `ui.py` | The Tkinter window: captions, drafts, search, pause, summary window, transcript saving |
 | `shortcut.py` | The application menu shortcut of `setup.sh` / `setup.ps1` (`.desktop` file, Start menu, `.app`); the icon is in `assets/` |
 | `model_setup.py` | The model downloads of `setup.sh` / `setup.ps1`: Whisper, Ollama and the summary model, with checks and retries |

@@ -54,7 +54,7 @@ def config_to_argv(parser: argparse.ArgumentParser, config: dict) -> list[str]:
             if not isinstance(value, bool):
                 raise ConfigError(f"'{key}' must be true or false")
             argv.append(flag if value else f"--no-{flag[2:]}")
-        elif key.replace("-", "_") == "vocab" and isinstance(value, list):
+        elif key.replace("-", "_") in ("vocab", "alert") and isinstance(value, list):
             argv.append(f"{flag}={', '.join(str(v) for v in value)}")  # vocab = ["Anggi", "OKR"] also works
         elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
             argv.append(f"{flag}={value}")
@@ -173,6 +173,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help='Comma-separated names/terms Whisper should recognize, e.g. "Anggi, Kubernetes, OKR"')
     p.add_argument("--vocab-file", default=None,
                    help="Text file with one name/term per line (# starts a comment). Combined with --vocab")
+    p.add_argument("--alert", default=None,
+                   help='Comma-separated words to watch for, e.g. "Anggi, backend team". When someone else says one, '
+                        "it is highlighted and a desktop notification appears (default: as set in the window menu)")
     p.add_argument("--summarizer", default="ollama", choices=["ollama", "claude"],
                    help="Engine for the Summary button. ollama = local & private (default), "
                         "claude = Claude API, better quality but the transcript is sent to Anthropic")
@@ -218,5 +221,7 @@ def parse_args(argv: list[str] | None = None):
 
     args = p.parse_args(config_argv + argv)  # command-line options come last, so they win
     args._config_path = path
+    if args.alert is None:  # the words set in the window last time (they are also hotwords for Whisper below)
+        args.alert = ", ".join(w for w in load_window_state().get("alert_words") or [] if isinstance(w, str))
     args._whisper_transcribe = make_transcribe_fn(args.beam_size, load_vocab(args))
     return args

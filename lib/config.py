@@ -168,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--draft-model", default="base",
                    help="Small model used only for draft text, to keep captions live (tiny | base | ...). "
                         "'same' = use the main model (default: base)")
-    p.add_argument("--beam-size", type=int, default=1, help="1 = fastest; 3–5 = more accurate but slower")
+    p.add_argument("--beam-size", type=int, default=1, help="1 = fastest; 3-5 = more accurate but slower")
     p.add_argument("--vocab", default=None,
                    help='Comma-separated names/terms Whisper should recognize, e.g. "Anggi, Kubernetes, OKR"')
     p.add_argument("--vocab-file", default=None,
@@ -182,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Language of the summary: auto = the meeting's main language (default), or a code like id, en")
     p.add_argument("--auto-summary", action=argparse.BooleanOptionalAction, default=None,
                    help="Make the summary by itself after --auto-summary-after minutes without speech, and when the "
-                        "window is closed (default: the tick in the ⋯ menu, as you last left it; off at first)")
+                        "window is closed (default: the tick in the window menu, as you last left it; off at first)")
     p.add_argument("--auto-summary-after", type=float, default=10,
                    help="Minutes without speech before the automatic summary (default: 10). Pause stops the clock")
     p.add_argument("--ollama-url", default="http://localhost:11434", help="Address of the Ollama server")

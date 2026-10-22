@@ -34,6 +34,10 @@ def log_to_file() -> None:
 def main() -> None:
     if sys.stderr is None:  # pythonw, from the Windows Start menu shortcut: no console, so messages go to a log
         log_to_file()
+    for stream in (sys.stdout, sys.stderr):
+        # Redirected on Windows, output uses the old code page (cp1252): print "?" for what it can't show, don't crash
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     args = parse_args()
     if IS_LINUX and not (shutil.which("parec") or shutil.which("pw-record")):
         sys.exit("Neither parec nor pw-record was found. Install parec with one of:\n"

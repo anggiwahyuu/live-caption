@@ -365,6 +365,7 @@ The dot shows the state at a glance: **green** listening, **amber** paused, **re
 | **Auto summary** | `⋯` menu | | Makes the summary by itself after a silence and when you close the window ([Step 8](#step-8--meeting-summary)) |
 | **Alert words…** | `⋯` menu | | Tells you when someone says your name ([Alert words](#alert-words)) |
 | **Search…** | `⋯` menu | `Ctrl+F` | Opens a search bar above the text (see below) |
+| **Meeting history…** | `⋯` menu | `Ctrl+H` | Past meetings: search all of them, summarize them ([Step 7](#step-7--transcript-and-closing-the-app)) |
 | **Save as…** | `⋯` menu | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
 | **Clear screen** | `⋯` menu | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
 
@@ -409,6 +410,7 @@ The window's size, position and the **Always on top** and **Auto summary** ticks
   ```
 
   The speaker label is only added when both **Me** and **Participant** were transcribed, and the translation (if any) becomes a second line. If the subtitles run consistently early or late, export again with the start time adjusted by that many seconds.
+- **Past meetings:** `⋯` → **Meeting history…** (or `Ctrl+H`) lists every transcript in the folder, newest first, with its length and whether it has a summary. Type in the search box to search **all meetings at once**: all words must occur in the meeting (in any order, translations count too), and the lines that contain them are shown with the words highlighted. With nothing typed, the selected meeting's summary is shown, or its first lines. **Summarize** makes the summary of a past meeting (also of transcripts from before the Summary button existed) and adds it to the top of its file; you can close the history window meanwhile. **Open file** (or a double click) opens the transcript in your text editor, **Open folder** the folder.
 - **To close:** click the window's close button, or press `Ctrl+C` in the terminal. Since the transcript is saved continuously, nothing is lost when you close it.
 
 ### Step 8 — Meeting summary
@@ -420,7 +422,15 @@ Press **Summary** (or `Ctrl+M`) at any time, usually at the end of the meeting. 
 - **Action items**: who does what, and by when
 - **Open questions**
 
-The summary opens in its own window (with a **Copy** button) and is added at the top of the transcript file. Press it again later to replace it with a summary of the longer meeting.
+The summary opens in its own window and is added at the top of the transcript file. Press it again later to replace it with a summary of the longer meeting. To send it on:
+
+| Button | Gives you |
+|---|---|
+| **Copy for chat** | Text for WhatsApp, Slack or Telegram: bold headings (`*Keputusan*`) and `•` bullets, which all three show as intended |
+| **Copy Markdown** | The summary as written, for Notion, Obsidian, GitHub, … |
+| **Save as…** | A **Word document** (`.docx`, opens in Word, LibreOffice, Google Docs), plain text (`.txt`, e.g. for an email) or Markdown |
+
+All three start with a title like *Ringkasan rapat — 22 Oktober 2026, 10:00*, in the summary's language.
 
 **Automatic summary.** Tick **Auto summary** in the `⋯` menu (it's off until you do; the app remembers your choice) and the summary is made by itself:
 
@@ -637,6 +647,8 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `translation.py` | Google / Argos translation of final lines |
 | `summary.py` | Meeting summaries with Ollama or the Claude API |
 | `subtitles.py` | SRT / WebVTT export |
+| `export.py` | The summary as chat text, plain text and Word (`.docx`, built without extra packages) |
+| `history.py`, `history_window.py` | Reading past transcripts back, searching them, adding a summary to them; the Meeting history window |
 | `alerts.py` | Alert words: matching them in a line, desktop notifications on each OS |
 | `ui.py` | The Tkinter window: captions, drafts, search, pause, summary window, transcript saving |
 | `shortcut.py` | The application menu shortcut of `setup.sh` / `setup.ps1` (`.desktop` file, Start menu, `.app`); the icon is in `assets/` |

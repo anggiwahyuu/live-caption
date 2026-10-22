@@ -367,12 +367,16 @@ class Summarizer:
 class SummaryWorker(threading.Thread):
     """Runs one summary in the background so the window stays responsive."""
 
-    def __init__(self, summarizer: Summarizer, transcript: str, ui_q: queue.Queue, language: str | None = None):
+    def __init__(self, summarizer: Summarizer, transcript: str, ui_q: queue.Queue, language: str | None = None,
+                 kind: str = "summary"):
+        """kind: the message sent to the window, "<kind>" with the text or "<kind>_failed" with the error
+        (the history window uses its own, so a past meeting's summary isn't taken for the live one)."""
         super().__init__(daemon=True)
         self.summarizer, self.transcript, self.ui_q, self.language = summarizer, transcript, ui_q, language
+        self.kind = kind
 
     def run(self) -> None:
         try:
-            self.ui_q.put(("summary", self.summarizer.summarize(self.transcript, self.language)))
+            self.ui_q.put((self.kind, self.summarizer.summarize(self.transcript, self.language)))
         except Exception as e:
-            self.ui_q.put(("summary_failed", str(e)))
+            self.ui_q.put((f"{self.kind}_failed", str(e)))

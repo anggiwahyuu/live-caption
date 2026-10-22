@@ -11,7 +11,8 @@ import threading
 import time
 from pathlib import Path
 
-from . import alerts
+from . import alerts, export
+from .history_window import HistoryWindow
 from .common import IS_LINUX, IS_MAC
 from .config import DEFAULT_GEOMETRY, load_window_state, restore_geometry, save_window_state
 from .subtitles import parse_clock, subtitle_cues, to_srt, to_vtt
@@ -43,10 +44,12 @@ class App:
         self.summarizer = summarizer
         self.summary: tuple[dt.datetime, str] | None = None  # (when, Markdown) of the latest summary
         self.summary_win = None
+        self.summary_language: str | None = None  # the language the latest summary was asked for
         self.summary_upto = 0                   # lines with id < this are in the latest summary (or the one being made)
         self.last_line_at = time.monotonic()    # for the automatic summary after a silence
         self.closing = False                    # the window was closed; it goes once the last summary is done
         self.on_close = on_close
+        self.history: HistoryWindow | None = None
         self.alert_words = alerts.parse_words(args.alert)
         self.alert_re = alerts.compile_words(self.alert_words)
         self.last_alert_at = float("-inf")      # when the last desktop notification was shown
@@ -119,6 +122,7 @@ class App:
         self.menu.add_command(label="Alert words…", command=self._edit_alert_words)
         self.menu.add_separator()
         self.menu.add_command(label="Search…", command=self._open_search, accelerator=f"{mod_label}+F")
+        self.menu.add_command(label="Meeting history…", command=self._open_history, accelerator=f"{mod_label}+H")
         self.menu.add_command(label="Save as…", command=self._save_as, accelerator=f"{mod_label}+S")
         self.menu.add_command(label="Clear screen", command=self._clear, accelerator=f"{mod_label}+L")
 
@@ -159,7 +163,8 @@ class App:
         # Keyboard shortcuts (window must be focused). Cmd on macOS, Ctrl elsewhere.
         mod = "Command" if IS_MAC else "Control"
         shortcuts = {"p": self._toggle_pause, "t": self._toggle_translate_key,
-                     "s": self._save_as, "l": self._clear, "m": self._summarize, "f": self._open_search}
+                     "s": self._save_as, "l": self._clear, "m": self._summarize, "f": self._open_search,
+                     "h": self._open_history}
         for key, fn in shortcuts.items():
             for k in (key, key.upper()):  # also works with Caps Lock on
                 for widget in (root, self.search_entry):  # on the entry too, so its own Ctrl+key editing keys don't run
@@ -264,6 +269,9 @@ class App:
                     self._add_translation(msg[1], msg[2])
                 elif kind == "summary":
                     self._show_summary(msg[1])
+                elif kind.startswith("history_summary"):  # a past meeting's summary (history window)
+                    if self.history is not None:
+                        self.history.on_message(kind, msg[1])
                 elif kind == "summary_failed":
                     self.summary_btn.configure(state="normal")
                     self._set_status(f"Summary failed: {msg[1]}", "err", always=True)
@@ -505,6 +513,13 @@ class App:
         if self.summary_win is not None and self.summary_win.winfo_exists():
             self.summary_win.attributes("-topmost", self.pin_var.get())
 
+    def _open_history(self) -> None:
+        if self.history is not None and self.history.alive():
+            self.history.win.lift()
+            self.history.win.focus_force()
+            return
+        self.history = HistoryWindow(self)
+
     # ---- alert words
     def _alert(self, ts: dt.datetime, label: str, text: str, word: str) -> None:
         self._set_status(f"⚑ \u201c{word}\u201d said at {ts:%H:%M:%S}", "warn", always=True)
@@ -645,15 +660,13 @@ class App:
             language = spoken.most_common(1)[0][0] if spoken else None
         self.summary_btn.configure(state="disabled")
         self.summary_upto = self.next_id
+        self.summary_language = language
         what = "Auto summary: summarizing" if auto else "Summarizing"
         self._set_status(f"{what} {len(lines)} lines with {self.summarizer.describe()}…", "muted", always=True)
         SummaryWorker(self.summarizer, "\n".join(lines), self.ui_q, language).start()
 
     def _show_summary(self, text: str) -> None:
-        tk = self.tk
-        from tkinter import ttk
-        c = self.COLORS
-        self.summary = (dt.datetime.now(), text)
+        self.summary =(dt.datetime.now(), text)
         self.summary_btn.configure(state="normal")
         self._set_status(f"Summary ready — saved in {self.transcript_path.name}", "muted", always=True)
         self._autosave()
@@ -663,41 +676,74 @@ class App:
 
         if self.summary_win is not None and self.summary_win.winfo_exists():
             self.summary_win.destroy()
-        win = self.summary_win = tk.Toplevel(self.root)
-        win.title("Meeting summary")
-        win.geometry("640x480")
+        self.summary_win = self.open_summary_window(text, self.started, self.summary_language, self.transcript_path)
+
+    def open_summary_window(self, text: str, started: dt.datetime, language: str | None, transcript: Path):
+        """A window showing a summary, with ways to send it on. Also used for past meetings (lib/history.py)."""
+        tk = self.tk
+        from tkinter import filedialog, ttk
+        c = self.COLORS
+        heading = export.title(started, language)
+        win = tk.Toplevel(self.root)
+        win.title(heading)
+        win.geometry("680x480")
         win.configure(bg=c["bg"])
         win.attributes("-topmost", self.pin_var.get())
 
-        def copy() -> None:
+        def copy(content: str, what: str) -> None:
             self.root.clipboard_clear()
-            self.root.clipboard_append(text)  # the Markdown as written, ready to paste into chat or a doc
-            self._set_status("Summary copied to the clipboard", "muted", always=True)
+            self.root.clipboard_append(content)
+            self._set_status(f"Summary copied {what}", "muted", always=True)
+
+        def save() -> None:
+            path = filedialog.asksaveasfilename(
+                parent=win, defaultextension=".docx", initialdir=str(transcript.parent),
+                initialfile=f"{transcript.stem}-summary.docx",
+                filetypes=[("Word document", "*.docx"), ("Text", "*.txt"), ("Markdown", "*.md")])
+            if not path:
+                return
+            ext = Path(path).suffix.lower()
+            try:
+                if ext == ".docx":
+                    Path(path).write_bytes(export.to_docx(text, heading))
+                elif ext == ".md":
+                    Path(path).write_text(f"# {heading}\n\n{text}\n", encoding="utf-8")
+                else:
+                    Path(path).write_text(export.to_text(text, heading), encoding="utf-8")
+            except OSError as e:
+                self._set_status(f"Failed to save: {e}", "err", always=True)
+                return
+            self._set_status(f"Summary saved: {path}", "muted", always=True)
 
         buttons = tk.Frame(win, bg=c["bg"])
         buttons.pack(side="bottom", fill="x", padx=12, pady=10)
         ttk.Button(buttons, text="Close", command=win.destroy).pack(side="right")
-        ttk.Button(buttons, text="Copy", style="Accent.TButton", command=copy).pack(side="right", padx=(0, 6))
+        ttk.Button(buttons, text="Save as…", command=save).pack(side="right", padx=(0, 6))
+        ttk.Button(buttons, text="Copy Markdown",
+                   command=lambda: copy(f"# {heading}\n\n{text}", "as Markdown")).pack(side="right", padx=(0, 6))
+        ttk.Button(buttons, text="Copy for chat", style="Accent.TButton",
+                   command=lambda: copy(export.to_chat(text, heading), "for WhatsApp / Slack / Telegram")
+                   ).pack(side="right", padx=(0, 6))
         tk.Frame(win, bg=c["line"], height=1).pack(side="bottom", fill="x")
 
         box = tk.Text(win, wrap="word", bg=c["bg"], fg=c["fg"], relief="flat", padx=18, pady=12,
                       font=self.f_body, highlightthickness=0, selectbackground=c["press"])
+        box.tag_configure("title", font=self.f_bold, foreground=c["fg"], spacing3=2)
         box.tag_configure("heading", font=self.f_bold, foreground=c["Participant"], spacing1=12, spacing3=4)
         box.tag_configure("bullet", lmargin1=8, lmargin2=24, spacing1=2)
-        box.tag_configure("none", lmargin1=8, foreground=c["muted"])
-        for line in text.splitlines():  # light Markdown: headings and bullets; the rest as is
-            if not line.strip():
-                continue  # headings already have space above them
-            if m := re.match(r"#{1,6}\s+(.*)", line):
-                box.insert("end", m[1] + "\n", "heading")
-            elif m := re.match(r"\s*[-*]\s+(.*)", line):
-                box.insert("end", f"•  {m[1]}\n", "bullet")
-            elif re.fullmatch(r"\s*[-*]\s*", line):  # the prompt writes "-" for an empty section
-                box.insert("end", "—\n", "none")
-            else:
+        box.tag_configure("empty", lmargin1=8, foreground=c["muted"])
+        box.insert("end", heading + "\n", "title")
+        for kind, line in export.blocks(text):
+            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+            if kind == "bullet":
+                box.insert("end", f"•  {line}\n", "bullet")
+            elif kind == "text":
                 box.insert("end", line + "\n")
+            else:
+                box.insert("end", line + "\n", kind)
         box.configure(state="disabled")  # still selectable, so parts can be copied
         box.pack(fill="both", expand=True)
+        return win
 
     # ---- transcript
     def _render(self) -> str:

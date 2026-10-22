@@ -650,11 +650,15 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `export.py` | The summary as chat text, plain text and Word (`.docx`, built without extra packages) |
 | `history.py`, `history_window.py` | Reading past transcripts back, searching them, adding a summary to them; the Meeting history window |
 | `alerts.py` | Alert words: matching them in a line, desktop notifications on each OS |
-| `ui.py` | The Tkinter window: captions, drafts, search, pause, summary window, transcript saving |
+| `ui.py` | The main window: status header, `⋯` menu, live captions with drafts and translations, alert words, the summary (on demand and automatic) |
+| `transcript.py` | The meeting being transcribed: its lines, translations and summary, and the Markdown file they're saved to (no Tkinter) |
+| `theme.py` | Colors, fonts and button styles shared by every window |
+| `search_bar.py` | The `Ctrl+F` search bar |
+| `summary_window.py` | The summary window with its Copy / Save buttons (live and past meetings) |
 | `shortcut.py` | The application menu shortcut of `setup.sh` / `setup.ps1` (`.desktop` file, Start menu, `.app`); the icon is in `assets/` |
 | `model_setup.py` | The model downloads of `setup.sh` / `setup.ps1`: Whisper, Ollama and the summary model, with checks and retries |
 
-Data flows one way: `audio` → `transcriber` → `ui` (→ `translation` / `summary` on demand). Modules talk through queues, so only `ui` touches Tkinter and only `main` knows all the pieces. A new feature usually means one new module plus a few lines in `ui.py`, `config.py` (its options) and `main.py` (to wire it in).
+Data flows one way: `audio` → `transcriber` → `ui` (→ `translation` / `summary` on demand). Modules talk through queues, so only the window modules (`ui`, `search_bar`, `summary_window`, `history_window`, `theme`) touch Tkinter, and only `main` knows all the pieces. What a window shows but doesn't draw (`transcript`, `history`, `export`, `alerts`) has no Tkinter in it, so it can be tested without a window. A new feature usually means one new module plus a few lines in `ui.py`, `config.py` (its options) and `main.py` (to wire it in).
 
 ## Running the tests
 

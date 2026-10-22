@@ -29,7 +29,7 @@ class HistoryWindow:
         from tkinter import ttk
 
         self.app = app
-        c = app.COLORS
+        c, theme = app.theme.colors, app.theme
         self.folder = Path(app.args.out_dir).expanduser()
         self.meetings: list[history.Meeting] = []
         self.shown: list[tuple[history.Meeting, list[int]]] = []
@@ -44,25 +44,13 @@ class HistoryWindow:
         win.attributes("-topmost", app.pin_var.get())
         win.bind("<Escape>", lambda _e: win.destroy())
 
-        style = ttk.Style(app.root)
-        style.configure("History.Treeview", background=c["bg"], fieldbackground=c["bg"], foreground=c["fg"],
-                        bordercolor=c["line"], lightcolor=c["bg"], darkcolor=c["bg"], font=app.f_ui,
-                        rowheight=app.f_body_obj.metrics("linespace") + 8)
-        style.map("History.Treeview", background=[("selected", c["accent"])],
-                  foreground=[("selected", c["accent_fg"])])
-        style.configure("History.Treeview.Heading", background=c["field"], foreground=c["muted"],
-                        bordercolor=c["line"], lightcolor=c["field"], darkcolor=c["field"], font=app.f_ui, relief="flat")
-        style.map("History.Treeview.Heading", background=[("active", c["hover"])])
-
         # ---- search
         top = tk.Frame(win, bg=c["bg"])
         top.pack(fill="x", padx=12, pady=(12, 8))
         self.query = tk.StringVar()
-        entry = tk.Entry(top, textvariable=self.query, bg=c["field"], fg=c["fg"], insertbackground=c["fg"],
-                         relief="flat", highlightthickness=1, highlightbackground=c["line"],
-                         highlightcolor=c["Participant"], font=app.f_ui)
+        entry = theme.entry(top, textvariable=self.query)
         entry.pack(side="left", fill="x", expand=True, ipady=4)
-        self.count = tk.Label(top, text="", bg=c["bg"], fg=c["muted"], font=app.f_ui)
+        self.count = tk.Label(top, text="", bg=c["bg"], fg=c["muted"], font=theme.ui)
         self.count.pack(side="left", padx=(8, 0))
         self.query.trace_add("write", lambda *_: self._search_soon())
         entry.focus_set()
@@ -79,7 +67,7 @@ class HistoryWindow:
         self.summary_btn.pack(side="right", padx=(0, 6))
         self.summarize_btn = ttk.Button(buttons, text="✦  Summarize", style="Accent.TButton", command=self._summarize)
         self.summarize_btn.pack(side="right", padx=(0, 6))
-        self.status = tk.Label(win, text="", anchor="w", bg=c["bg"], fg=c["muted"], font=app.f_ui)
+        self.status = tk.Label(win, text="", anchor="w", bg=c["bg"], fg=c["muted"], font=theme.ui)
         self.status.pack(side="bottom", fill="x", padx=12)  # its own row: the buttons leave no room beside them
         tk.Frame(win, bg=c["line"], height=1).pack(side="bottom", fill="x")
 
@@ -101,14 +89,14 @@ class HistoryWindow:
 
         # ---- preview of the selected meeting: its summary, or the lines the search found
         self.text = tk.Text(win, wrap="word", bg=c["bg"], fg=c["fg"], relief="flat", padx=14, pady=10,
-                            font=app.f_body, highlightthickness=0, selectbackground=c["press"], height=8)
+                            font=theme.body, highlightthickness=0, selectbackground=c["press"], height=8)
         self.text.pack(fill="both", expand=True, pady=(8, 0))
-        self.text.tag_configure("muted", foreground=c["muted"], font=app.f_small)
-        self.text.tag_configure("heading", foreground=c["Participant"], font=app.f_bold, spacing1=8)
-        self.text.tag_configure("Participant", foreground=c["Participant"], font=app.f_bold)
-        self.text.tag_configure("Me", foreground=c["Me"], font=app.f_bold)
+        self.text.tag_configure("muted", foreground=c["muted"], font=theme.small)
+        self.text.tag_configure("heading", foreground=c["Participant"], font=theme.bold, spacing1=8)
+        self.text.tag_configure("Participant", foreground=c["Participant"], font=theme.bold)
+        self.text.tag_configure("Me", foreground=c["Me"], font=theme.bold)
         self.text.tag_configure("found", background=c["match_cur"], foreground="#ffffff")
-        self.text.tag_configure("tr", foreground=c["tr"], font=app.f_italic)
+        self.text.tag_configure("tr", foreground=c["tr"], font=theme.italic)
 
         self.reload()
 
@@ -117,7 +105,7 @@ class HistoryWindow:
 
     # ---- list
     def reload(self, keep: Path | None = None) -> None:
-        self.meetings = history.list_meetings(self.folder, exclude=self.app.transcript_path)
+        self.meetings = history.list_meetings(self.folder, exclude=self.app.transcript.path)
         self._search(keep)
 
     def _search_soon(self) -> None:
@@ -209,7 +197,7 @@ class HistoryWindow:
     def _show_summary(self) -> None:
         if (selected := self._selected()) and selected[0].summary:
             m = selected[0]
-            self.app.open_summary_window(m.summary, m.started, history.guess_language(m), m.path)
+            self.app.show_summary_window(m.summary, m.started, history.guess_language(m), m.path)
 
     def _summarize(self) -> None:
         selected = self._selected()
@@ -222,7 +210,7 @@ class HistoryWindow:
         if language == "auto":
             language = history.guess_language(m)
         self.status.configure(text=f"Summarizing {m.when} with {self.app.summarizer.describe()}…",
-                              fg=self.app.COLORS["muted"])
+                              fg=self.app.theme.colors["muted"])
         SummaryWorker(self.app.summarizer, m.transcript(), self.app.ui_q, language, kind="history_summary").start()
 
     def on_message(self, kind: str, payload: str) -> None:
@@ -231,7 +219,7 @@ class HistoryWindow:
         path, self.summarizing = self.summarizing, None
         if path is None:
             return
-        c = self.app.COLORS
+        c = self.app.theme.colors
         if kind == "history_summary_failed":
             message, color = f"Summary failed: {payload}", "err"
         else:
@@ -242,7 +230,7 @@ class HistoryWindow:
             except OSError as e:
                 message, color = f"Summary made, but saving it failed: {e}", "err"
             m = history.read_meeting(path) if path.exists() else history.Meeting(path, history.started_from(path))
-            self.app.open_summary_window(payload, m.started, history.guess_language(m), path)
+            self.app.show_summary_window(payload, m.started, history.guess_language(m), path)
         if self.alive():
             self.status.configure(text=message, fg=c[color])
             self.reload(keep=path)

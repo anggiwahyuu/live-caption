@@ -31,7 +31,7 @@ jobs:
           - {name: Ubuntu, os: ubuntu-latest}
           - {name: macOS, os: macos-latest}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: setup.sh
         run: ./setup.sh $SETUP_ARGS
       - name: setup.sh again (nothing left to do)
@@ -61,7 +61,7 @@ jobs:
           - {name: Arch Linux, image: "archlinux:latest", prepare: "pacman -Syu --noconfirm"}
           - {name: openSUSE Tumbleweed, image: "opensuse/tumbleweed:latest"}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Refresh the package lists
         if: matrix.prepare
         run: ${{ matrix.prepare }}
@@ -84,7 +84,7 @@ jobs:
       run:
         shell: powershell  # Windows PowerShell 5.1, the one every Windows PC has
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: setup.ps1
         run: |
           powershell -ExecutionPolicy Bypass -File setup.ps1 $env:SETUP_ARGS.Split(" ")

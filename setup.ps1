@@ -33,20 +33,31 @@ function Run([scriptblock]$command, [string]$what) {
 function Add-ToPath($dir) {
     if ((Test-Path $dir) -and -not ($env:Path -split ";" -contains $dir)) { $env:Path = "$dir;$env:Path" }
 }
+# Installers record new folders in the registry; this window only sees them after reading it again.
+function Read-RegistryPath {
+    foreach ($scope in "Machine", "User") {
+        foreach ($dir in [Environment]::GetEnvironmentVariable("Path", $scope) -split ";") {
+            if ($dir) { Add-ToPath ([Environment]::ExpandEnvironmentVariables($dir)) }
+        }
+    }
+    Add-ToPath "$env:USERPROFILE\.local\bin"              # where uv's own installer puts it
+    Add-ToPath "$env:LOCALAPPDATA\Microsoft\WinGet\Links"  # where winget links command-line tools
+}
 
 $py = ".venv\Scripts\python.exe"
 
 # ---------------------------------------------------------------------------- 1. uv
 Step "uv (Python environment manager)"
-if (Have "uv") {
-    Note "Installed: $(uv --version)"
-} elseif (Have "winget") {
-    Run { winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements } "Installing uv"
-} else {
-    Run { powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" } "Installing uv"
+if (-not (Have "uv") -and (Have "winget")) {
+    winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements
+    # 0x8A15002B: "no applicable upgrade", i.e. already installed, just not on this window's PATH yet.
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) { Note "winget couldn't install uv (exit code $LASTEXITCODE)" }
+    Read-RegistryPath
 }
-Add-ToPath "$env:USERPROFILE\.local\bin"            # where uv's installer puts it
-Add-ToPath "$env:LOCALAPPDATA\Microsoft\WinGet\Links"  # where winget links command-line tools
+if (-not (Have "uv")) {
+    Run { powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" } "Installing uv"
+    Read-RegistryPath
+}
 if (-not (Have "uv")) { Fail "uv was installed but isn't on PATH: open a new PowerShell window and run setup.ps1 again." }
 
 # ---------------------------------------------------------------------------- 2. Python environment

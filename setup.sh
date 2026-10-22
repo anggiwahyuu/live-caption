@@ -66,17 +66,18 @@ if [[ $OS == Linux ]]; then
   have parec || have pw-record || missing+=(audio)
   /usr/bin/python3 -c 'import tkinter' 2>/dev/null || missing+=(tk)
   have curl || missing+=(curl)
+  have awk && have tar && have gzip || missing+=(awk/tar/gzip)  # uv's installer needs them; minimal images lack awk
   if [[ ${#missing[@]} -eq 0 ]]; then
-    note "Already installed (audio recorder, Tkinter, curl)"
+    note "Already installed (audio recorder, Tkinter, curl, awk/tar/gzip)"
   else
     note "Missing: ${missing[*]}. Installing (asks for your password)…"
     case $FAMILY in
-      debian) $SUDO apt-get update -q && $SUDO apt-get install -y pulseaudio-utils python3-tk curl ;;
-      fedora) $SUDO dnf install -y pulseaudio-utils python3-tkinter curl ;;
-      arch)   $SUDO pacman -S --needed --noconfirm libpulse python tk curl \
+      debian) $SUDO apt-get update -q && $SUDO apt-get install -y pulseaudio-utils python3-tk curl gawk tar gzip ;;
+      fedora) $SUDO dnf install -y pulseaudio-utils python3-tkinter curl gawk tar gzip ;;
+      arch)   $SUDO pacman -S --needed --noconfirm libpulse python tk curl gawk tar gzip \
                 || die "pacman failed. If it says 404, your package list is old: run 'sudo pacman -Syu' and try again." ;;
-      suse)   $SUDO zypper install -y pulseaudio-utils python3-tk curl ;;
-      *)      die "Unknown distribution. Install parec (pulseaudio-utils), Tkinter for python3 and curl, then run again." ;;
+      suse)   $SUDO zypper install -y pulseaudio-utils python3-tk curl gawk tar gzip ;;
+      *)      die "Unknown distribution. Install parec (pulseaudio-utils), Tkinter for python3, curl and awk, then run again." ;;
     esac
   fi
 elif [[ $OS == Darwin ]]; then

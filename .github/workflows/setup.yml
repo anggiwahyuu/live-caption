@@ -1,0 +1,94 @@
+# Runs setup.sh / setup.ps1 on fresh machines (Ubuntu, other distributions, macOS, Windows), twice:
+# the second run must find everything in place. Then checks the app starts and Whisper runs.
+# Summaries are skipped: the Ollama model is several GB.
+name: setup
+
+on:
+  push:
+    paths: [setup.sh, setup.ps1, requirements.txt, run.sh, run.bat, live_caption.py, "lib/**", .github/workflows/setup.yml]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # A tiny Whisper model keeps the download small; draft and final text then share it.
+  SETUP_ARGS: --model tiny --draft-model tiny --no-summary
+  SMOKE: |  # run from stdin in the project folder, so `import lib` works
+    import numpy as np
+    import lib.main  # every module of the app, Tkinter included
+    from faster_whisper import WhisperModel
+    model = WhisperModel("tiny", device="cpu", compute_type="int8")
+    segments, info = model.transcribe(np.zeros(2 * 16000, dtype=np.float32))
+    print("Whisper OK:", len(list(segments)), "segments,", info.duration, "s")
+
+jobs:
+  unix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: Ubuntu, os: ubuntu-latest}
+          - {name: macOS, os: macos-latest}
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup.sh
+        run: ./setup.sh $SETUP_ARGS
+      - name: setup.sh again (nothing left to do)
+        run: ./setup.sh $SETUP_ARGS
+      - name: App starts, Whisper runs
+        run: |
+          ./run.sh --help > /dev/null
+          .venv/bin/python - <<< "$SMOKE"
+
+  distros:
+    # The other Linux families, each in its own container (as root, so setup.sh runs without sudo).
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: Debian, image: "debian:stable"}
+          - {name: Fedora, image: "fedora:latest"}
+          - {name: Arch Linux, image: "archlinux:latest", prepare: "pacman -Syu --noconfirm"}
+          - {name: openSUSE Tumbleweed, image: "opensuse/tumbleweed:latest"}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh the package lists
+        if: matrix.prepare
+        run: ${{ matrix.prepare }}
+      - name: setup.sh
+        run: bash ./setup.sh $SETUP_ARGS
+      - name: setup.sh again (nothing left to do)
+        run: bash ./setup.sh $SETUP_ARGS
+      - name: App starts, Whisper runs
+        run: |
+          bash ./run.sh --help > /dev/null
+          .venv/bin/python - <<< "$SMOKE"
+          # setup.sh must have used the distribution's Python (smooth fonts), not uv's own
+          .venv/bin/python -c "import sys; assert '/uv/python/' not in sys.base_prefix, sys.base_prefix"
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell  # Windows PowerShell 5.1, the one every Windows PC has
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup.ps1
+        run: |
+          powershell -ExecutionPolicy Bypass -File setup.ps1 $env:SETUP_ARGS.Split(" ")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: setup.ps1 again (nothing left to do)
+        run: |
+          powershell -ExecutionPolicy Bypass -File setup.ps1 $env:SETUP_ARGS.Split(" ")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: App starts, Whisper runs
+        run: |
+          cmd /c "run.bat --help > NUL"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:SMOKE | .venv\Scripts\python.exe -  # via stdin: PowerShell 5.1 mangles quotes in arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

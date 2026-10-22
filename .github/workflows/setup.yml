@@ -51,7 +51,14 @@ jobs:
     # The other Linux families, each in its own container (as root, so setup.sh runs without sudo).
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    container: ${{ matrix.image }}
+    container:
+      image: ${{ matrix.image }}
+      # The openSUSE image doesn't define PATH, so the runner wouldn't even find sh in it.
+      env:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    defaults:
+      run:
+        shell: bash  # in containers the default is sh, which is dash on Debian (no <<<)
     strategy:
       fail-fast: false
       matrix:

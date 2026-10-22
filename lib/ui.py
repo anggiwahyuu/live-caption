@@ -6,7 +6,9 @@ import collections
 import datetime as dt
 import queue
 import re
+import sys
 import threading
+import time
 from pathlib import Path
 
 from .common import IS_LINUX, IS_MAC
@@ -18,6 +20,7 @@ from .translation import Translator
 # First installed family wins; otherwise Tk's default UI font is used.
 UI_FONTS = ["Inter", "Noto Sans", "Cantarell", "Ubuntu", "Segoe UI", "SF Pro Text", "Helvetica Neue", "DejaVu Sans"]
 NEW_SPEAKER_GAP = dt.timedelta(minutes=2)  # same speaker after this long gets a new header (with its time)
+AUTO_SUMMARY_MIN_LINES = 5  # fewer new lines than this aren't worth an automatic summary
 
 
 class App:
@@ -38,6 +41,10 @@ class App:
         self.summarizer = summarizer
         self.summary: tuple[dt.datetime, str] | None = None  # (when, Markdown) of the latest summary
         self.summary_win = None
+        self.summary_upto = 0                   # lines with id < this are in the latest summary (or the one being made)
+        self.last_line_at = time.monotonic()    # for the automatic summary after a silence
+        self.closing = False                    # the window was closed; it goes once the last summary is done
+        self.on_close = on_close
         self.last_status = ("Starting…", "muted")  # restored when resuming from pause
         self.ready = False                          # model loaded: the status dot turns green
         self.records: dict[int, dict] = {}
@@ -69,8 +76,10 @@ class App:
             pass
 
         def close() -> None:
-            save_window_state({"geometry": self._window_geometry(), "always_on_top": self.pin_var.get()})
-            on_close()
+            save_window_state({"geometry": self._window_geometry(), "always_on_top": self.pin_var.get(),
+                               "auto_summary": self.auto_var.get()})
+            if not self._summary_before_close():
+                on_close()
         root.protocol("WM_DELETE_WINDOW", close)
 
         self._setup_fonts_and_style(tk, ttk)
@@ -93,11 +102,15 @@ class App:
         # ---- the ⋯ menu: everything that isn't needed every minute
         self.tr_var = tk.BooleanVar(value=translator.enabled)
         self.pin_var = tk.BooleanVar(value=on_top)
+        auto = args.auto_summary if args.auto_summary is not None else state.get("auto_summary") is True
+        self.auto_var = tk.BooleanVar(value=auto)
         self.menu = tk.Menu(root, tearoff=0, bg=c["field"], fg=c["fg"], activebackground=c["hover"],
                             activeforeground=c["fg"], selectcolor=c["fg"], bd=0, relief="flat", font=self.f_ui)
         self.menu.add_checkbutton(label=f"Translate → {translator.target}", variable=self.tr_var,
                                   command=self._toggle_translate, accelerator=f"{mod_label}+T")
         self.menu.add_checkbutton(label="Always on top", variable=self.pin_var, command=self._toggle_on_top)
+        self.menu.add_checkbutton(label=f"Auto summary (after {args.auto_summary_after:g} min of silence)",
+                                  variable=self.auto_var, command=self._toggle_auto_summary)
         self.menu.add_separator()
         self.menu.add_command(label="Search…", command=self._open_search, accelerator=f"{mod_label}+F")
         self.menu.add_command(label="Save as…", command=self._save_as, accelerator=f"{mod_label}+S")
@@ -152,6 +165,7 @@ class App:
             self._note("ℹ Text looks rough because this Python's Tk has no font smoothing (Xft). "
                        "To fix it, recreate .venv with your distribution's Python: see README, step 1.3.", "info")
         root.after(30, self._poll)
+        root.after(10_000, self._auto_summary_check)
 
     def _setup_fonts_and_style(self, tk, ttk) -> None:
         from tkinter import font as tkfont
@@ -242,6 +256,10 @@ class App:
                 elif kind == "summary_failed":
                     self.summary_btn.configure(state="normal")
                     self._set_status(f"Summary failed: {msg[1]}", "err", always=True)
+                    if self.closing:
+                        print(f"Summary before closing failed: {msg[1]}", file=sys.stderr)  # the log, from the menu
+                        self.on_close()
+                        return
         except queue.Empty:
             pass
         self.root.after(30, self._poll)
@@ -333,6 +351,7 @@ class App:
         parts.append((f"{text}\n", "body"))
         self._append(parts, mark=f"tr{line_id}")
         self.last_speaker, self.last_ts = label, ts
+        self.last_line_at = time.monotonic()
         self._finish_draft(label, seg_id)
         self._render_drafts()
         if self.translator.enabled:
@@ -468,6 +487,13 @@ class App:
         if self.summary_win is not None and self.summary_win.winfo_exists():
             self.summary_win.attributes("-topmost", self.pin_var.get())
 
+    def _toggle_auto_summary(self) -> None:
+        if self.auto_var.get():
+            self._set_status(f"Auto summary on: after {self.args.auto_summary_after:g} min of silence, and on close",
+                             "muted", always=True)
+        else:
+            self._set_status("Auto summary off", "muted", always=True)
+
     def _toggle_pause(self) -> None:
         mod = "Cmd" if IS_MAC else "Ctrl"
         if self.paused.is_set():
@@ -528,8 +554,38 @@ class App:
         self._set_status(f"Saved: {path}{note}", "muted", always=True)
 
     # ---- summary
-    def _summarize(self) -> None:
-        if str(self.summary_btn.cget("state")) == "disabled":
+    def _summarizing(self) -> bool:
+        return str(self.summary_btn.cget("state")) == "disabled"
+
+    def _auto_summary_due(self) -> bool:
+        """Auto summary on, enough new lines since the last summary, and nobody spoke for a while.
+        Not while paused: a pause is a break, not the end of the meeting."""
+        if not self.auto_var.get() or self.closing or self.paused.is_set() or self._summarizing():
+            return False
+        if self.next_id - self.summary_upto < AUTO_SUMMARY_MIN_LINES:
+            return False
+        return time.monotonic() - self.last_line_at >= self.args.auto_summary_after * 60
+
+    def _auto_summary_check(self) -> None:
+        self.root.after(10_000, self._auto_summary_check)
+        if self._auto_summary_due():
+            self._summarize(auto=True)
+
+    def _summary_before_close(self) -> bool:
+        """On closing with auto summary on: summarize the new lines first, then close.
+        Returns False when the window can close right away (closing a second time always can)."""
+        if self.closing or not self.auto_var.get():
+            return False
+        if not self._summarizing() and self.next_id - self.summary_upto < AUTO_SUMMARY_MIN_LINES:
+            return False
+        self.closing = True
+        if not self._summarizing():
+            self._summarize(auto=True)
+        self._set_status("Summarizing before closing… close again to quit now", "warn", always=True)
+        return True
+
+    def _summarize(self, auto: bool = False) -> None:
+        if self._summarizing():
             return  # a summary is already being made
         lines = [f"[{r['ts']:%H:%M:%S}] {r['label']}: {r['text']}" for r in self.records.values()]
         if not lines:
@@ -542,7 +598,9 @@ class App:
                 spoken[r["lang"]] += len(r["text"])
             language = spoken.most_common(1)[0][0] if spoken else None
         self.summary_btn.configure(state="disabled")
-        self._set_status(f"Summarizing {len(lines)} lines with {self.summarizer.describe()}…", "muted", always=True)
+        self.summary_upto = self.next_id
+        what = "Auto summary: summarizing" if auto else "Summarizing"
+        self._set_status(f"{what} {len(lines)} lines with {self.summarizer.describe()}…", "muted", always=True)
         SummaryWorker(self.summarizer, "\n".join(lines), self.ui_q, language).start()
 
     def _show_summary(self, text: str) -> None:
@@ -553,6 +611,9 @@ class App:
         self.summary_btn.configure(state="normal")
         self._set_status(f"Summary ready — saved in {self.transcript_path.name}", "muted", always=True)
         self._autosave()
+        if self.closing:
+            self.on_close()
+            return
 
         if self.summary_win is not None and self.summary_win.winfo_exists():
             self.summary_win.destroy()

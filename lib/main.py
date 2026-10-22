@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import queue
 import shutil
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from .audio import AudioCapture, AudioHub, Segmenter
 from .common import IS_LINUX, SOURCES
-from .config import config_dir, parse_args
+from .config import log_path, parse_args
 from .summary import Summarizer
 from .transcriber import Transcriber
 from .translation import TranslationWorker, Translator
@@ -20,11 +21,19 @@ from .ui import App
 ICON = Path(__file__).resolve().parent.parent / "assets" / "live-caption.png"
 
 
+def log_to_file() -> None:
+    """The same log run.sh writes on Linux/macOS when started from the menu: only this one and the previous one."""
+    path = log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 1_000_000:
+        path.replace(path.with_name(path.name + ".old"))
+    sys.stdout = sys.stderr = open(path, "a", encoding="utf-8", buffering=1)
+    print(f"==== {dt.datetime.now():%Y-%m-%d %H:%M:%S} Live Caption started")
+
+
 def main() -> None:
     if sys.stderr is None:  # pythonw, from the Windows Start menu shortcut: no console, so messages go to a log
-        log_dir = config_dir()
-        log_dir.mkdir(parents=True, exist_ok=True)
-        sys.stdout = sys.stderr = open(log_dir / "live-caption.log", "a", encoding="utf-8", buffering=1)
+        log_to_file()
     args = parse_args()
     if IS_LINUX and not (shutil.which("parec") or shutil.which("pw-record")):
         sys.exit("Neither parec nor pw-record was found. Install parec with one of:\n"

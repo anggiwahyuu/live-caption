@@ -50,7 +50,7 @@ At the end it lists what's ready and, for anything that failed, the command that
 | `--recreate-venv` | Delete `.venv` and build it again |
 | app options | Pick other models, as with `./run.sh`: `--model medium`, `--summary-model qwen2.5:3b` |
 
-To remove the menu shortcut again: `.venv/bin/python -m lib.shortcut --remove` (Windows: `.venv\Scripts\python.exe -m lib.shortcut --remove`). Started from the menu, the app has no terminal for its messages: on Windows they go to `%APPDATA%\live-caption\live-caption.log`, on macOS to `~/Library/Logs/live-caption.log`; on Linux, start `./run.sh` in a terminal to see them.
+To remove the menu shortcut again: `.venv/bin/python -m lib.shortcut --remove` (Windows: `.venv\Scripts\python.exe -m lib.shortcut --remove`). Started from the menu, the app has no terminal for its messages, so they go to a log file: `~/.config/live-caption/live-caption.log` on Linux and macOS, `%APPDATA%\live-caption\live-caption.log` on Windows. Look there when the app doesn't open from the menu. Only this run's log and the previous one (`.log.old`) are kept once it passes 1 MB.
 
 The NVIDIA driver isn't installed by the script (it needs a reboot and depends on your card): see [1.1](#11-nvidia-driver-only-with-an-nvidia-gpu) and [2](#2-installation-on-windows). On macOS, the Multi-Output Device still has to be created by hand ([section 3, step 2](#3-installation-on-macos)).
 
@@ -362,6 +362,7 @@ The dot shows the state at a glance: **green** listening, **amber** paused, **re
 | **Summary** | button | `Ctrl+M` | Summarizes the meeting so far: summary, decisions, action items, open questions (see Step 8) |
 | **Translate → id** | `⋯` menu | `Ctrl+T` | Turns translation on/off at any time |
 | **Always on top** | `⋯` menu | | Keeps the window above the meeting app, like subtitles |
+| **Auto summary** | `⋯` menu | | Makes the summary by itself after a silence and when you close the window ([Step 8](#step-8--meeting-summary)) |
 | **Search…** | `⋯` menu | `Ctrl+F` | Opens a search bar above the text (see below) |
 | **Save as…** | `⋯` menu | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
 | **Clear screen** | `⋯` menu | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
@@ -377,7 +378,7 @@ If you scroll up to read older text, new sentences and translations won't make t
 
 **Searching:** press `Ctrl+F` and type, e.g. `deadline`. Every match is highlighted (upper/lower case doesn't matter) and the newest one is selected, since you're usually looking for something said recently. `Enter` / `F3` goes to the next match, `Shift+Enter` / `Shift+F3` to the previous one; the counter shows e.g. `2 / 5`. New lines that arrive while the search is open are highlighted too, and the view stays where you are. Draft text is not searched, because it is still changing. Only the text on screen is searched: after **Clear screen**, earlier lines are only in the transcript file. `Esc` closes the search and jumps back to the live captions.
 
-The window's size, position and **Always on top** setting are remembered when you close it, and restored on the next run. If the saved position is off-screen (e.g. a monitor was unplugged), only the size is restored. `--geometry 760x280` overrides it for one run.
+The window's size, position and the **Always on top** and **Auto summary** ticks are remembered when you close it, and restored on the next run. If the saved position is off-screen (e.g. a monitor was unplugged), only the size is restored. `--geometry 760x280` overrides it for one run.
 
 ### Step 7 — Transcript and closing the app
 
@@ -419,6 +420,13 @@ Press **Summary** (or `Ctrl+M`) at any time, usually at the end of the meeting. 
 - **Open questions**
 
 The summary opens in its own window (with a **Copy** button) and is added at the top of the transcript file. Press it again later to replace it with a summary of the longer meeting.
+
+**Automatic summary.** Tick **Auto summary** in the `⋯` menu (it's off until you do; the app remembers your choice) and the summary is made by itself:
+
+- after **10 minutes without speech**, when at least 5 new lines were said since the last summary. Change the wait with `--auto-summary-after 5` (minutes). If people talk again afterwards, the next silence makes a new summary that replaces it.
+- when you **close the window**: it stays open until the summary of the latest lines is saved, then closes. Close it a second time to quit at once.
+
+A short break doesn't need the tick off: press **Pause** during the break, as the silence clock doesn't run while paused. To start with it on (or off) whatever the tick says, use `--auto-summary` / `--no-auto-summary`, or `auto-summary = true` in `config.toml`.
 
 There are two engines:
 

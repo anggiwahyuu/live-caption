@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from .common import IS_LINUX, IS_MAC, IS_WINDOWS
+from .config import log_path
 
 PROJECT = Path(__file__).resolve().parent.parent
 ASSETS = PROJECT / "assets"
@@ -33,8 +34,8 @@ def _xdg_data_home() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
 
 
-def desktop_exec_quote(path: Path) -> str:
-    """A path quoted for the Exec= key (Desktop Entry spec: quote, backslash-escape \" ` $ \\, double %)."""
+def desktop_exec_quote(path: Path | str) -> str:
+    """An argument quoted for the Exec= key (Desktop Entry spec: quote, backslash-escape \" ` $ \\, double %)."""
     escaped = "".join("\\" + c if c in '"`$\\' else c for c in str(path))
     return '"' + escaped.replace("%", "%%") + '"'
 
@@ -46,7 +47,8 @@ def desktop_entry(project: Path) -> str:
         f"Name={NAME}",
         "GenericName=Meeting captions",
         f"Comment={COMMENT}",
-        f"Exec={desktop_exec_quote(project / 'run.sh')}",
+        # run.sh sends the messages to this log, as there is no terminal to show them
+        f"Exec=env {desktop_exec_quote(f'LIVE_CAPTION_LOG={log_path()}')} {desktop_exec_quote(project / 'run.sh')}",
         f"Path={project}",
         f"Icon={APP_ID}",
         "Terminal=false",
@@ -125,9 +127,8 @@ def install_mac() -> list[Path]:
     (contents / "Info.plist").write_text(info_plist(), encoding="utf-8")
     (contents / "Resources" / f"{APP_ID}.icns").write_bytes(icns_from_png((ASSETS / f"{APP_ID}.png").read_bytes()))
     launcher = contents / "MacOS" / APP_ID
-    log = Path.home() / "Library" / "Logs" / f"{APP_ID}.log"
-    launcher.write_text(f'#!/bin/bash\n# Started from Finder or the Dock: there is no terminal, so messages go to a log.\n'
-                        f'exec "{PROJECT}/run.sh" >> "{log}" 2>&1\n', encoding="utf-8")
+    launcher.write_text(f'#!/bin/bash\n# Started from Finder or the Dock: no terminal, so run.sh sends messages to a log.\n'
+                        f'export LIVE_CAPTION_LOG="{log_path()}"\nexec "{PROJECT}/run.sh"\n', encoding="utf-8")
     launcher.chmod(0o755)
     return [app]
 

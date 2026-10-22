@@ -26,6 +26,11 @@ def config_dir() -> Path:
 
 
 # Options that only make sense on the command line, never in config.toml.
+def log_path() -> Path:
+    """Where messages go when the app was started from the menu shortcut (no terminal): see run.sh and main.py."""
+    return config_dir() / "live-caption.log"
+
+
 CLI_ONLY = {"help", "config", "init_config"}
 
 
@@ -175,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Model for summaries (default: qwen2.5:7b for ollama, claude-opus-5-5 for claude)")
     p.add_argument("--summary-lang", default="auto",
                    help="Language of the summary: auto = the meeting's main language (default), or a code like id, en")
+    p.add_argument("--auto-summary", action=argparse.BooleanOptionalAction, default=None,
+                   help="Make the summary by itself after --auto-summary-after minutes without speech, and when the "
+                        "window is closed (default: the tick in the ⋯ menu, as you last left it; off at first)")
+    p.add_argument("--auto-summary-after", type=float, default=10,
+                   help="Minutes without speech before the automatic summary (default: 10). Pause stops the clock")
     p.add_argument("--ollama-url", default="http://localhost:11434", help="Address of the Ollama server")
     p.add_argument("--font-size", type=int, default=13)
     p.add_argument("--opacity", type=float, default=0.93)

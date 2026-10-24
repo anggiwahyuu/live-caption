@@ -185,8 +185,12 @@ class AudioCapture(threading.Thread):
     """Records one source ("system" or "mic") and feeds it to its Segmenter.
 
     Backends are tried in order: if one fails before delivering any audio (not installed,
-    no sound server, no device), the next one is used.
+    no sound server, no device), the next one is used. When recording breaks off later (a Bluetooth headset
+    disconnects, a USB device is unplugged), it reconnects on its own, to the default device of that moment.
     """
+
+    RETRY_WAITS = (1.0, 2.0, 5.0)  # seconds between reconnect attempts; the last one repeats until it works
+    STABLE_SECONDS = 2.0  # audio this long without a failure = reconnected (not a device that drops right away)
 
     def __init__(self, source: str, device: str | None, segmenter: Segmenter,
                  stop_event: threading.Event, report):
@@ -198,6 +202,7 @@ class AudioCapture(threading.Thread):
         self.report = report
         self.proc: subprocess.Popen | None = None
         self._pending = np.zeros(0, dtype=np.float32)
+        self.attempt = 0  # reconnect attempts since the recording broke off (0 = recording normally)
 
     def _backends(self):
         if IS_WINDOWS:
@@ -207,24 +212,54 @@ class AudioCapture(threading.Thread):
         return [("parec", self._blocks_parec), ("pw-record", self._blocks_pw_record)]
 
     def run(self) -> None:
+        label = self.segmenter.label
+        recorded = False  # audio came through once: a failure after that is a lost device, so reconnect
+        while not self.stop_event.is_set():
+            failure = self._record_once()
+            if failure is None or self.stop_event.is_set():
+                break
+            name, error, started = failure
+            recorded = recorded or started
+            if not recorded:  # never worked (no recorder, no sound server, no device): retrying won't help
+                self.report(f"Recording '{label}' stopped ({name}): {error}")
+                break
+            self.segmenter.flush()  # keep what was said before the break
+            self._pending = np.zeros(0, dtype=np.float32)
+            if self.attempt == 0:
+                self.report(f"Recording '{label}' lost at {dt.datetime.now():%H:%M:%S} ({name}: {error}). "
+                            "Reconnecting…")
+            self.stop_event.wait(self.RETRY_WAITS[min(self.attempt, len(self.RETRY_WAITS) - 1)])
+            self.attempt += 1
+        self.segmenter.flush()
+
+    def _record_once(self):
+        """Records with the first backend that works until stopped (-> None) or until it fails
+        (-> (backend name, error, whether any audio came through))."""
         backends = self._backends()
         for i, (name, blocks) in enumerate(backends):
             started = False
+            samples = 0
             try:
                 for block in blocks():
                     started = True
+                    if self.attempt:
+                        samples += len(block)
+                        if samples >= self.STABLE_SECONDS * SAMPLE_RATE:
+                            self.attempt = 0
+                            self.report(f"Recording '{self.segmenter.label}' again from "
+                                        f"{dt.datetime.now():%H:%M:%S}", "recovered")
                     self._feed(block)
                     if self.stop_event.is_set():
                         break
-                break
+                return None
             except Exception as e:  # missing library/command, no sound server, no device, ...
                 if self.stop_event.is_set():
-                    break
+                    return None
                 if started or i == len(backends) - 1:
-                    self.report(f"Recording '{self.segmenter.label}' stopped ({name}): {e}")
-                    break
-                self.report(f"{name} unavailable ({e}), switching to {backends[i + 1][0]}", "info")
-        self.segmenter.flush()
+                    return name, e, started
+                if not self.attempt:  # while reconnecting, the same notice every few seconds is only noise
+                    self.report(f"{name} unavailable ({e}), switching to {backends[i + 1][0]}", "info")
+        return None
 
     def _feed(self, block: np.ndarray) -> None:
         """Re-chunk blocks of any length into the FRAME_SAMPLES frames the Segmenter expects."""
@@ -321,6 +356,9 @@ class AudioCapture(threading.Thread):
     def _blocks_sounddevice(self):
         import sounddevice as sd  # pyrefly: ignore[missing-import]  (installed on macOS only)
 
+        if self.attempt:  # reconnecting: PortAudio only sees devices added or removed after a restart
+            sd._terminate()
+            sd._initialize()
         if self.source == "system":
             # macOS has no built-in loopback: system audio comes from a virtual device such as BlackHole.
             wanted = (self.device or "BlackHole").lower()

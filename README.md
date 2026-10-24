@@ -170,7 +170,9 @@ The same on every distribution. The environment is built on **your distribution'
 ```bash
 cd live-caption
 uv venv --python /usr/bin/python3 .venv
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu   # see below
 uv pip install -r requirements.txt
+uv pip install -r requirements-nvidia.txt   # only with an NVIDIA GPU (step 1.1)
 chmod +x run.sh
 ```
 
@@ -181,12 +183,14 @@ Already set up the environment with `uv venv --python 3.12` before? Recreate it 
 ```bash
 rm -rf .venv
 uv venv --python /usr/bin/python3 .venv
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 uv pip install -r requirements.txt
+uv pip install -r requirements-nvidia.txt   # only with an NVIDIA GPU
 ```
 
 If your distribution's Python is older than 3.10, use `uv venv --python 3.12 .venv` instead: everything works, only the text looks rough.
 
-This downloads about 1–2 GB (faster-whisper and the CUDA libraries). Whisper models are downloaded automatically on first run, to `~/.cache/huggingface`.
+This downloads about 1 GB, plus 2 GB of CUDA libraries with an NVIDIA GPU. The `torch` line comes first because torch (needed by offline translation, which runs on the CPU) would otherwise bring another ~2.5 GB of CUDA libraries it never uses. Whisper models are downloaded automatically on first run, to `~/.cache/huggingface`.
 
 ## 2. Installation on Windows
 
@@ -206,6 +210,7 @@ This downloads about 1–2 GB (faster-whisper and the CUDA libraries). Whisper m
    cd live-caption
    uv venv --python 3.12 .venv
    uv pip install -r requirements.txt
+   uv pip install -r requirements-nvidia.txt   # only with an NVIDIA GPU (step 1)
    ```
 
    This also installs **PyAudioWPatch**, which records the audio of your default speakers/headset through WASAPI loopback. No virtual audio cable is needed.
@@ -633,6 +638,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 - **No text at all**: make sure the meeting audio goes through the default output. Test with `parec --device=@DEFAULT_MONITOR@ | head -c 100000 | wc -c` while playing any sound. If the output is on HDMI or Bluetooth, use `--monitor`.
 - **`Neither parec nor pw-record was found` (Linux)**: install the package that provides `parec` for your distribution (see [1.2 System packages](#12-system-packages)): `pulseaudio-utils` on Debian/Ubuntu, Fedora and openSUSE, `libpulse` on Arch.
 - **`Recording 'Participant' stopped (pw-record)` (Linux)**: both recorders failed. Check that PipeWire is running: `systemctl --user status pipewire`.
+- **`Recording 'Me' lost at 10:42:05 … Reconnecting…`**: the device disconnected mid-meeting (Bluetooth headset, unplugged USB microphone, restarted sound server). The app keeps trying every few seconds and records again by itself, from the default device of that moment; `Recording 'Me' again from …` marks where the gap ends in the transcript. Nothing to do unless it never comes back: then check the device in the system's sound settings.
 - **Window doesn't stay on top (Wayland)**: KDE: right-click the title bar → *More Actions* → *Keep Above Others*. GNOME (Ubuntu, Fedora): right-click the title bar → *Always on Top*.
 - **Status "N sentences behind"**: the GPU can't keep up. Try `--draft-interval 0.5`, `--draft-model tiny`, or a smaller main model.
 - **Odd text like "Terima kasih." / "Thank you." during silence**: a typical Whisper hallucination. Some of it is already filtered; raise `--threshold` if it still happens often.
@@ -657,7 +663,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 
 ## Known limitations
 
-- **No automatic reconnect.** If a recorder stops mid-meeting (e.g. a Bluetooth headset disconnects or an audio device is unplugged), that source stops recording and a red error appears. Restart the app to record again. On Windows, changing the default output during a meeting likely keeps recording the old device, so restart the app after switching.
+- **Switching the default output on Windows mid-meeting** likely keeps recording the old device, so restart the app after switching. (A device that disconnects or is unplugged is handled: see [Troubleshooting](#troubleshooting).)
 - **Hallucination filter covers Indonesian and English only.** Fake phrases Whisper produces during silence (like "Thank you for watching") are filtered only in those two languages. For other languages, raise `--threshold` if they show up often.
 - **Library versions aren't pinned.** `requirements.txt` lists package names only, so recreating the environment later may install newer versions. To lock today's versions: `uv pip compile requirements.txt -o requirements.lock`, then install with `uv pip install -r requirements.lock`.
 - **Moving or renaming the project folder breaks `source .venv/bin/activate`**, because the virtualenv stores its absolute path. `./run.sh` and `run.bat` keep working since they call the venv's python directly. To fix `activate`, delete `.venv` and recreate it with the installation steps above.
@@ -672,7 +678,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `main.py` | Wires everything together: creates the recorders, workers and window, and starts them |
 | `config.py` | Command-line options, the `config.toml` settings file, the remembered window state |
 | `common.py` | Shared constants: audio format (16 kHz, 30 ms frames), OS checks, source labels |
-| `audio.py` | Recording (`parec` / `pw-record` / WASAPI / BlackHole), resampling, splitting speech into sentences, the queue to Whisper |
+| `audio.py` | Recording (`parec` / `pw-record` / WASAPI / BlackHole) and reconnecting when a device drops, resampling, splitting speech into sentences, the queue to Whisper |
 | `transcriber.py` | Loading faster-whisper (GPU with CPU fallback) and turning audio into text; `--vocab` |
 | `translation.py` | Google / Argos translation of final lines |
 | `summary.py` | Meeting summaries with Ollama or the Claude API |

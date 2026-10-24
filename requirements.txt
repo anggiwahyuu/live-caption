@@ -1,14 +1,14 @@
 faster-whisper>=1.1
 numpy
-# CUDA libraries for NVIDIA GPUs on Linux/Windows (recent CTranslate2 needs CUDA 12 + cuDNN 9)
-nvidia-cublas-cu12; sys_platform != "darwin"
-nvidia-cudnn-cu12==9.*; sys_platform != "darwin"
+# The CUDA libraries for NVIDIA GPUs (about 2 GB) are in requirements-nvidia.txt: setup only installs them
+# when an NVIDIA GPU works.
 # Audio capture. Linux uses the parec / pw-record commands, so it needs nothing extra.
 PyAudioWPatch; sys_platform == "win32"   # Windows: WASAPI loopback
 sounddevice; sys_platform == "darwin"    # macOS: CoreAudio (system audio via BlackHole)
 # Online translation (lightweight)
 deep-translator
-# Offline translation (--translator argos). Large dependencies (pulls in torch & stanza)
+# Offline translation (--translator argos). Large dependencies (pulls in torch & stanza; on Linux, setup
+# installs torch's CPU build first, without the ~2.5 GB of CUDA libraries it would never use)
 argostranslate
 # Meeting summaries with --summarizer claude (optional; the default, Ollama, needs no package)
 anthropic

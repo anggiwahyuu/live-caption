@@ -72,8 +72,22 @@ if (Test-Path $py) {
     # Python 3.12 from uv: on Windows its Tkinter uses the system fonts, so no system Python is needed.
     Run { uv venv --python 3.12 .venv } "Creating the virtualenv"
 }
-Note "Installing the Python libraries (first time: about 1-2 GB)..."
+Note "Installing the Python libraries (first time: about 1 GB)..."
 Run { uv pip install --python $py -r requirements.txt } "Installing the Python libraries"
+$nvidia = $false
+if (Have "nvidia-smi") { nvidia-smi *> $null; $nvidia = $LASTEXITCODE -eq 0 }
+if ($nvidia) {
+    Note "NVIDIA GPU found: installing its CUDA libraries (cuBLAS, cuDNN; about 2 GB)..."
+    Run { uv pip install --python $py -r requirements-nvidia.txt } "Installing the CUDA libraries"
+} else {
+    # Earlier setups installed them on every computer.
+    $unused = @(uv pip list --python $py --format freeze 2>$null | ForEach-Object { ($_ -split "==")[0] } |
+                Where-Object { $_ -like "nvidia-*" })
+    if ($unused.Count -gt 0) {
+        Note "Removing $($unused.Count) CUDA libraries nothing uses..."
+        Run { uv pip uninstall --python $py @unused } "Removing the CUDA libraries"
+    }
+}
 
 # ---------------------------------------------------------------------------- 3. Start menu shortcut
 Step "Start menu shortcut"

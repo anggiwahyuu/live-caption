@@ -55,6 +55,7 @@ class App:
         self.last_alert_at = float("-inf")      # when the last desktop notification was shown
         # captions
         self.last_status = ("Starting…", "muted")  # restored when resuming from pause
+        self.calm_status = self.last_status         # the last one that wasn't an error
         self.ready = False                          # model loaded: the status dot turns green
         self.view_floor = 0  # lines with id < this have been cleared from the screen
         self.drafts: dict[str, tuple[int, str]] = {}  # label -> (seg_id, temporary text)
@@ -220,6 +221,10 @@ class App:
                     self._note(f"⚠ {msg[1]}", "err")
                 elif kind == "info":  # notice only (e.g. recorder fallback): keep the status line as it is
                     self._note(f"ℹ {msg[1]}", "info")
+                elif kind == "recovered":  # a recording reconnected: its error is over
+                    self._note(f"ℹ {msg[1]}", "info")
+                    if self.last_status[1] == "err":
+                        self._set_status(*self.calm_status)
                 elif kind == "line":
                     self._add_line(*msg[1:])
                 elif kind == "draft":
@@ -245,6 +250,8 @@ class App:
         """Show a status message. While paused, only errors and replies to the user's own actions
         (always=True) are shown, next to the pause notice; routine status updates wait for Resume."""
         self.last_status = (text, color)
+        if color != "err":
+            self.calm_status = (text, color)
         if text.startswith("Ready"):
             self.ready = True
         if not self.paused.is_set():

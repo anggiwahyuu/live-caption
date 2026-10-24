@@ -150,8 +150,33 @@ if [[ -x $PY ]] && $PY -c 'import sys' 2>/dev/null; then
 else
   uv venv --python "$PY_SPEC" .venv
 fi
-note "Installing the Python libraries (first time: about 1-2 GB)…"
+note "Installing the Python libraries (first time: about 1 GB)…"
+if [[ $OS == Linux ]] && ! uv pip show --python "$PY" torch 2>/dev/null | grep -q '^Version: .*+cpu$'; then
+  # torch is only there for argostranslate's sentence splitter, which runs on the CPU. From PyPI, torch for
+  # Linux brings ~2.5 GB of CUDA libraries: take its CPU build instead (requirements.txt then keeps it).
+  uv pip install --python "$PY" --reinstall-package torch torch --index-url https://download.pytorch.org/whl/cpu \
+    || warn "Couldn't get torch's CPU build: using the one from PyPI, with its CUDA libraries (~2.5 GB more)."
+fi
 uv pip install --python "$PY" -r requirements.txt
+NVIDIA=0
+[[ $OS == Linux ]] && have nvidia-smi && nvidia-smi >/dev/null 2>&1 && NVIDIA=1
+if [[ $NVIDIA == 1 ]]; then
+  note "NVIDIA GPU found: installing its CUDA libraries (cuBLAS, cuDNN; about 2 GB)…"
+  uv pip install --python "$PY" -r requirements-nvidia.txt
+fi
+# Earlier setups installed CUDA libraries on every computer (and torch's own): remove the ones nothing uses.
+# Not while torch is a CUDA build (no CPU build above, or on macOS none of this exists): it needs them.
+unused=()
+if ! uv pip show --python "$PY" torch 2>/dev/null | grep -q '^Version: ' \
+    || uv pip show --python "$PY" torch 2>/dev/null | grep -q '^Version: .*+cpu$'; then
+  while read -r name; do
+    [[ $NVIDIA == 1 && $name == *-cu12 ]] || unused+=("$name")
+  done < <(uv pip list --python "$PY" --format freeze 2>/dev/null | grep -o '^nvidia-[^=]*' || true)
+fi
+if [[ ${#unused[@]} -gt 0 ]]; then
+  note "Removing ${#unused[@]} CUDA libraries nothing uses…"
+  uv pip uninstall --python "$PY" "${unused[@]}"
+fi
 chmod +x run.sh
 
 # ---------------------------------------------------------------------------- 4. menu shortcut

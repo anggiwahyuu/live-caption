@@ -5,7 +5,7 @@ name: setup
 
 on:
   push:
-    paths: [setup.sh, setup.ps1, requirements.txt, run.sh, run.bat, live_caption.py, "lib/**", .github/workflows/setup.yml]
+    paths: [setup.sh, setup.ps1, requirements.txt, requirements-nvidia.txt, run.sh, run.bat, live_caption.py, "lib/**", .github/workflows/setup.yml]
   pull_request:
   workflow_dispatch:
 

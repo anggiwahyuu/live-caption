@@ -37,7 +37,7 @@ WHISPER_GB = {"tiny": 0.08, "base": 0.15, "small": 0.5, "medium": 1.5, "large-v1
               "large-v3": 3.1, "large": 3.1, "large-v3-turbo": 1.6, "turbo": 1.6, "distil-large-v2": 1.5,
               "distil-large-v3": 1.5, "distil-large-v3.5": 1.5, "distil-medium.en": 0.8, "distil-small.en": 0.35}
 OLLAMA_GB = {"qwen2.5:7b": 4.7, "qwen2.5:3b": 1.9}
-OLLAMA_MIN_RAM_GB = {"qwen2.5:7b": 8}  # total RAM below which the smaller model is recommended (README Step 8)
+OLLAMA_MIN_RAM_GB = {"qwen2.5:7b": 8}  # total RAM below which the smaller model is recommended (README: Meeting summary)
 SMALL_SUMMARY_MODEL = "qwen2.5:3b"  # the fallback: half the size, twice as fast, less reliable
 RETRIES = 3
 # How the user starts setup and the app on this system, for the hints in the messages.
@@ -174,7 +174,7 @@ def setup_whisper(args, report: Report) -> None:
         if size and (free := free_gb(HF_HUB_CACHE)) < size + 0.5:
             report.add(FAIL, part, f"needs about {size} GB, but only {free:.1f} GB is free in {HF_HUB_CACHE}",
                        [f"Free some disk space, then run {SETUP} again"] +
-                       ([f"Or pick a smaller model (README Step 9), e.g.: {SETUP} --model base"] if main else []))
+                       ([f"Or pick a smaller model (docs/models.md), e.g.: {SETUP} --model base"] if main else []))
             continue
 
         say(f"   Downloading {name}" + (f" (about {size} GB)…" if size else "…"))
@@ -326,7 +326,7 @@ def start_ollama(url: str, report: Report):
             fixes = ["Install it: " + (command[-1] if command else "download the installer from https://ollama.com/download"),
                      later,
                      "Or summarize with the Claude API instead (online, the transcript is sent to Anthropic): "
-                     "--summarizer claude (README Step 8)"]
+                     "--summarizer claude (README: Meeting summary)"]
             report.add(FAIL, part, "Ollama is not installed", fixes)
             raise LookupError
         if ollama_up(url, wait=15):  # the installer usually starts it as a service
@@ -469,7 +469,7 @@ def gpu_info(report: Report) -> bool:
         out = None
     if out is None or out.returncode != 0 or not out.stdout.strip():
         report.add(WARN, "NVIDIA GPU", "nvidia-smi doesn't work, so CUDA can't be used",
-                   ["Check the NVIDIA driver (README step 1.1)"])
+                   ["Check the NVIDIA driver (docs/install.md: NVIDIA driver)"])
         return False
     else:
         gpu = out.stdout.strip().splitlines()[0]
@@ -479,10 +479,10 @@ def gpu_info(report: Report) -> bool:
         except Exception:
             cuda = False
         if cuda:
-            report.add(OK, "NVIDIA GPU", f"{gpu}: README Step 9 lists the model that fits")
+            report.add(OK, "NVIDIA GPU", f"{gpu}: docs/models.md lists the model that fits")
         else:
             report.add(WARN, "NVIDIA GPU", f"{gpu}, but CUDA isn't usable from Python",
-                       ["Check the NVIDIA driver and CUDA libraries (README step 1.1)"])
+                       ["Check the NVIDIA driver and CUDA libraries (docs/install.md: NVIDIA driver)"])
         return cuda
 
 

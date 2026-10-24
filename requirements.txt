@@ -1,5 +1,5 @@
 # The libraries the app needs. Setup installs the exact tested versions from requirements.lock: after editing
-# this file, run tools/lock-requirements.sh (README, "Library versions").
+# this file, run tools/lock-requirements.sh (docs/development.md, "Library versions").
 faster-whisper>=1.1
 numpy
 # The CUDA libraries for NVIDIA GPUs (about 2 GB) are in requirements-nvidia.txt: setup only installs them

@@ -106,7 +106,7 @@ elif [[ $OS == Darwin ]]; then
   else
     note "Installing BlackHole (carries the meeting audio to the app; asks for your password)…"
     brew install --cask blackhole-2ch
-    warn "Still to do by hand: create a Multi-Output Device in Audio MIDI Setup (README, section 3, step 2)."
+    warn "Still to do by hand: create a Multi-Output Device in Audio MIDI Setup (README: macOS, route the meeting audio through BlackHole)."
   fi
 else
   die "This script is for Linux and macOS. On Windows, run setup.ps1."

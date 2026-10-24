@@ -154,7 +154,7 @@ class App:
             self._note(f"ℹ Alert words: {', '.join(self.alert_words)}", "info")
         if self.theme.rough_fonts:
             self._note("ℹ Text looks rough because this Python's Tk has no font smoothing (Xft). "
-                       "To fix it, recreate .venv with your distribution's Python: see README, step 1.3.", "info")
+                       "To fix it, run ./setup.sh --recreate-venv (docs/install.md: Python environment).", "info")
         root.after(30, self._poll)
         root.after(10_000, self._auto_summary_check)
 

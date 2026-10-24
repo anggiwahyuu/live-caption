@@ -17,7 +17,7 @@ fi
 
 PY=.venv/bin/python
 if [[ ! -x $PY ]]; then
-  echo "Virtualenv not found. Follow the installation steps in README.md first" >&2
+  echo "Virtualenv not found. Run ./setup.sh first, see README.md" >&2
   exit 1
 fi
 

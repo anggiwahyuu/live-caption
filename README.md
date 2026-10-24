@@ -3,7 +3,7 @@
 Real-time speech-to-text for online meetings (Zoom, Google Meet, Teams, Discord, and more) on **Linux, Windows and macOS**. Translation is optional and can be switched on or off right from the app window.
 
 - Captures **the audio coming out of your speakers/headset**, so it works with any meeting app.
-- Local STT with **faster-whisper** on an NVIDIA GPU (e.g. GTX 1050, `int8`). Falls back to the CPU automatically if the GPU can't be used. On macOS it always runs on the CPU.
+- Local speech-to-text on **any GPU**: **faster-whisper** on NVIDIA GPUs (e.g. GTX 1050, `int8`), **whisper.cpp** on AMD and Intel GPUs (Vulkan) and Apple Silicon (Metal). Without a usable GPU it runs on the CPU. See [GPUs other than NVIDIA](#gpus-other-than-nvidia-amd-intel-apple).
 - **Real-time with draft mode**: temporary text (grey italics) appears while people speak and updates about every 0.25 seconds, then locks into final text when the speaker pauses. Drafts use a small model (`base`) for speed; final text uses the main model for accuracy.
 - A small always-on-top window, like subtitles.
 - Transcripts are saved automatically to `~/LiveCaption/meeting-<date>.md`.
@@ -12,9 +12,9 @@ How audio is recorded on each OS:
 
 | OS | System audio (other participants) | Microphone | Speech-to-text |
 |---|---|---|---|
-| Linux | `parec`, or `pw-record` if `parec` is missing or has no PulseAudio/pipewire-pulse server | Same | NVIDIA GPU (CUDA) or CPU |
-| Windows | PyAudioWPatch (WASAPI loopback), nothing extra to install | PyAudioWPatch | NVIDIA GPU (CUDA) or CPU |
-| macOS | sounddevice + the free **BlackHole** virtual audio device | sounddevice | CPU only |
+| Linux | `parec`, or `pw-record` if `parec` is missing or has no PulseAudio/pipewire-pulse server | Same | NVIDIA GPU (CUDA), AMD/Intel GPU (Vulkan) or CPU |
+| Windows | PyAudioWPatch (WASAPI loopback), nothing extra to install | PyAudioWPatch | NVIDIA GPU (CUDA), AMD/Intel GPU (Vulkan) or CPU |
+| macOS | sounddevice + the free **BlackHole** virtual audio device | sounddevice | Apple Silicon GPU (Metal), or CPU on Intel Macs |
 
 Follow the installation section for your OS (1, 2 or 3), then continue with [4. Running](#4-running). Or let a setup script do it for you:
 
@@ -35,7 +35,7 @@ What it does, skipping whatever is already there (so it's safe to run again):
 1. **System packages** (Linux/macOS only): the audio recorder, Tkinter and curl through your package manager (apt, dnf, pacman or zypper), or BlackHole through Homebrew on macOS. This asks for your password.
 2. **`uv` and the Python environment** (`.venv`). On Linux it's built on your distribution's Python, for smooth fonts (see [1.3](#13-python-environment)).
 3. **A shortcut in the application menu** (Linux: KDE, GNOME, XFCE, …; Windows: Start menu; macOS: `~/Applications/Live Caption.app`), so the app opens without a terminal. It starts with the settings in your [`config.toml`](#saving-your-settings), so put options like `lang = "id"` there.
-4. **The Whisper models** the app will use (`small` + `base` for drafts, or whatever `config.toml` says), with a free disk space check and retries on network errors.
+4. **The speech-to-text engine and its models** (`small` + `base` for drafts, or whatever `config.toml` says), with a free disk space check and retries on network errors. With a working NVIDIA GPU that's faster-whisper; otherwise setup installs whisper.cpp, measures which of your GPUs (or the CPU) is fastest and saves it ([details](#gpus-other-than-nvidia-amd-intel-apple)).
 5. **Meeting summaries, if you say yes:** installs [Ollama](https://ollama.com) when it's missing (it asks first and shows the command), downloads `qwen2.5:7b` (offers `qwen2.5:3b` on computers with less than 8 GB of RAM) and checks that it loads.
 
 At the end it lists what's ready and, for anything that failed, the command that fixes it. Options (the same on Windows):
@@ -221,7 +221,7 @@ Transcripts are saved to `C:\Users\<you>\LiveCaption\`.
 
 > Not tested on a real Mac yet. Please report anything that doesn't work.
 
-macOS can't record system audio on its own, so a free virtual audio device called **BlackHole** carries a copy of the meeting audio to the app. Speech-to-text runs on the CPU (CTranslate2, the engine behind faster-whisper, has no GPU support on macOS). On Apple Silicon, `small` should still be usable; on Intel Macs, try `--model base` if captions fall behind.
+macOS can't record system audio on its own, so a free virtual audio device called **BlackHole** carries a copy of the meeting audio to the app. On Apple Silicon, speech-to-text runs on the GPU through whisper.cpp (Metal), which `setup.sh` installs. Intel Macs use the CPU (try `--model base` if captions fall behind).
 
 1. **Install Homebrew** (if you don't have it) from <https://brew.sh>, then:
 
@@ -486,6 +486,36 @@ Summaries are written in the meeting's main language (the one Whisper detected f
 
 `--model` is used for the final text. Drafts still use a small model (`--draft-model base`) so captions stay live. Watch VRAM usage with `watch -n1 nvidia-smi` while the app is running.
 
+### GPUs other than NVIDIA (AMD, Intel, Apple)
+
+faster-whisper, the engine used on NVIDIA GPUs, can't use other GPUs. On every other computer the app uses **whisper.cpp** instead, which runs on:
+
+- **AMD and Intel GPUs** through **Vulkan** (Linux and Windows): Radeon RX cards, Radeon graphics in Ryzen laptops, Intel Arc and Iris Xe;
+- the **Apple Silicon GPU** through **Metal** (M1 and newer);
+- the **CPU**, where it's still about twice as fast as faster-whisper for a short sentence.
+
+`./setup.sh` / `setup.ps1` set it up when there's no working NVIDIA GPU: they download whisper.cpp (built from the official source for this project, see `.github/workflows/whisper-cpp.yml`) into `~/.local/share/live-caption/whisper.cpp` (Windows: `%LOCALAPPDATA%\live-caption\whisper.cpp`), download the model (`small` is a 260 MB file), and then **measure** each GPU and the CPU with a test sentence. The fastest is saved in `config.toml`, because built-in graphics can be slower than the CPU. Measured on one laptop with the `small` model, per 3-second sentence:
+
+| Device | Time |
+|---|---|
+| NVIDIA GTX 1050, faster-whisper (CUDA) | 0.37 s |
+| NVIDIA GTX 1050, whisper.cpp (Vulkan) | 0.27 s |
+| Intel Core i7-9750H CPU, whisper.cpp | 0.79 s |
+| Intel Core i7-9750H CPU, faster-whisper | 1.48 s |
+| Intel UHD 630 (built-in graphics), whisper.cpp (Vulkan) | 1.40 s: slower than the CPU, so setup picks the CPU there |
+
+A separate AMD card is much faster than a GTX 1050, so `small` or `medium` should keep up easily. On Linux, setup also installs the Vulkan driver if it's missing (Mesa's `mesa-vulkan-drivers`; on Arch `vulkan-radeon` / `vulkan-intel`). Without one, whisper.cpp uses the CPU.
+
+| Option | Meaning |
+|---|---|
+| `--engine auto` | Default: faster-whisper on a working NVIDIA GPU, else whisper.cpp if setup installed it, else faster-whisper on the CPU |
+| `--engine whisper.cpp` | whisper.cpp even with an NVIDIA GPU (it can be the faster one, see the table) |
+| `--whispercpp-device gpu:1` | Use GPU number 1 (`cpu` for the CPU, `auto` for the first separate GPU). Setup saves the fastest one |
+
+The status line shows where it runs, e.g. `Ready — small + draft base @ Vulkan (AMD Radeon RX 6600)`. To measure again after changing the GPU, delete the `whispercpp-device` line from `config.toml` and run setup again.
+
+Differences from faster-whisper: `--vocab` words are given to whisper.cpp as an initial prompt (it has no hotwords), which helps less with spelling; and the models are separate files (`--model` takes the same names: `tiny`, `base`, `small`, `medium`, `large-v3-turbo`; `distil-*` models don't exist for whisper.cpp).
+
 ### Ready-to-use commands
 
 ```bash
@@ -656,6 +686,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `search_bar.py` | The `Ctrl+F` search bar |
 | `summary_window.py` | The summary window with its Copy / Save buttons (live and past meetings) |
 | `shortcut.py` | The application menu shortcut of `setup.sh` / `setup.ps1` (`.desktop` file, Start menu, `.app`); the icon is in `assets/` |
+| `whispercpp.py` | The whisper.cpp engine for non-NVIDIA GPUs: downloading it, choosing the GPU, running `whisper-server` in the background; `tools/build-whisper-cpp.sh` and `.github/workflows/whisper-cpp.yml` build it |
 | `model_setup.py` | The model downloads of `setup.sh` / `setup.ps1`: Whisper, Ollama and the summary model, with checks and retries |
 
 Data flows one way: `audio` → `transcriber` → `ui` (→ `translation` / `summary` on demand). Modules talk through queues, so only the window modules (`ui`, `search_bar`, `summary_window`, `history_window`, `theme`) touch Tkinter, and only `main` knows all the pieces. What a window shows but doesn't draw (`transcript`, `history`, `export`, `alerts`) has no Tkinter in it, so it can be tested without a window. A new feature usually means one new module plus a few lines in `ui.py`, `config.py` (its options) and `main.py` (to wire it in).

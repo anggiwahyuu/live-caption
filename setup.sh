@@ -80,6 +80,24 @@ if [[ $OS == Linux ]]; then
       *)      die "Unknown distribution. Install parec (pulseaudio-utils), Tkinter for python3, curl and awk, then run again." ;;
     esac
   fi
+
+  # Without a working NVIDIA GPU, speech-to-text runs on whisper.cpp, which uses AMD / Intel GPUs through
+  # Vulkan: the Vulkan loader plus Mesa's driver. Optional: without them whisper.cpp uses the CPU.
+  if ! { have nvidia-smi && nvidia-smi >/dev/null 2>&1; } \
+      && ! { ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1' && compgen -G '/usr/share/vulkan/icd.d/*.json' >/dev/null; }; then
+    gpus=$( { have lspci && lspci; } 2>/dev/null | grep -iE 'vga|3d|display' || true)
+    note "Installing the Vulkan driver for the GPU (AMD / Intel)…"
+    case $FAMILY in
+      debian) $SUDO apt-get update -q && $SUDO apt-get install -y libvulkan1 mesa-vulkan-drivers ;;
+      fedora) $SUDO dnf install -y vulkan-loader mesa-vulkan-drivers ;;
+      arch)   # Arch has one driver package per GPU maker
+              drivers=(vulkan-icd-loader)
+              grep -qiE 'amd|ati|radeon' <<< "$gpus" && drivers+=(vulkan-radeon)
+              grep -qi 'intel' <<< "$gpus" && drivers+=(vulkan-intel)
+              $SUDO pacman -S --needed --noconfirm "${drivers[@]}" ;;
+      suse)   $SUDO zypper install -y libvulkan1 libvulkan_radeon libvulkan_intel ;;
+    esac || warn "No Vulkan driver: whisper.cpp will use the CPU instead of the GPU."
+  fi
 elif [[ $OS == Darwin ]]; then
   have brew || die "Homebrew is needed: install it from https://brew.sh, then run ./setup.sh again."
   note "macOS $(sw_vers -productVersion)"

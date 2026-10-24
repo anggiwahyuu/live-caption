@@ -1,0 +1,142 @@
+# Builds whisper.cpp's whisper-server for computers without an NVIDIA GPU (lib/whispercpp.py) and publishes it
+# as a GitHub Release, from which setup.sh / setup.ps1 download it.
+#
+#   Release:  git tag whisper-bin-v1 && git push origin whisper-bin-v1   (the tag lib/whispercpp.py names)
+#   Try out:  Actions tab -> whisper.cpp builds -> Run workflow (builds and tests, no release)
+#
+# Each build is tested: whisper-server transcribes a sample sentence with the tiny model.
+name: whisper.cpp builds
+
+on:
+  push:
+    tags: ["whisper-bin-v*"]
+  workflow_dispatch:
+
+env:
+  WHISPER_CPP_VERSION: v1.9.5
+  VULKAN_SDK_VERSION: 1.4.363.0
+  TEST_MODEL: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q8_0.bin
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04  # an old glibc: the build then also runs on older distributions
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential cmake ninja-build xz-utils libvulkan-dev
+          bash tools/build-whisper-cpp.sh
+      - name: Test on the CPU, and on Vulkan (lavapipe, a software Vulkan driver)
+        run: |
+          sudo apt-get install -y -q mesa-vulkan-drivers
+          mkdir t && tar -xzf dist/whisper-cpp-linux-x64.tar.gz -C t
+          curl -fsSL -o tiny.bin "$TEST_MODEL"
+          for device in -ng "-dev 0"; do
+            # shellcheck disable=SC2086  # $device is one or two words on purpose
+            t/whisper-server -m tiny.bin --port 8080 -nlp $device > server.log 2>&1 &
+            pid=$!
+            for _ in $(seq 60); do curl -fs http://127.0.0.1:8080/health | grep -q ok && break; sleep 1; done
+            text=$(curl -fs http://127.0.0.1:8080/inference -F file=@t/jfk.wav -F language=en)
+            echo "$device: $text"; grep -E "ggml_vulkan|backend" server.log | head -5 || true
+            kill "$pid"; wait "$pid" || true
+            echo "$text" | grep -qi "fellow Americans"
+          done
+      - uses: actions/upload-artifact@v4
+        with: {name: linux, path: dist/*}
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Vulkan SDK (glslc and headers)
+        shell: pwsh
+        run: |
+          $url = "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe"
+          Invoke-WebRequest $url -OutFile sdk.exe
+          Start-Process sdk.exe -Wait -ArgumentList "--root", "C:\VulkanSDK", "--accept-licenses", "--default-answer", "--confirm-command", "install"
+          "VULKAN_SDK=C:\VulkanSDK" | Out-File $env:GITHUB_ENV -Append
+          "C:\VulkanSDK\Bin" | Out-File $env:GITHUB_PATH -Append
+      - name: Build
+        shell: pwsh
+        run: |
+          git clone --quiet --depth 1 --branch $env:WHISPER_CPP_VERSION https://github.com/ggml-org/whisper.cpp src
+          # Same choices as tools/build-whisper-cpp.sh; static C runtime, so no Visual C++ redistributable is needed.
+          cmake -S src -B out -A x64 -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_VULKAN=ON -DGGML_OPENMP=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_TESTS=OFF `
+            -DWHISPER_SDL2=OFF "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build out --config Release --target whisper-server -j 4
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory pkg, dist | Out-Null
+          Copy-Item out\bin\Release\whisper-server.exe, out\bin\Release\*.dll pkg\
+          Copy-Item src\LICENSE pkg\LICENSE-whisper.cpp
+          Copy-Item src\samples\jfk.wav pkg\
+          "whisper.cpp $env:WHISPER_CPP_VERSION (Vulkan SDK $env:VULKAN_SDK_VERSION), built $(Get-Date -Format yyyy-MM-dd)" | Out-File pkg\VERSION -Encoding ascii
+          Compress-Archive pkg\* dist\whisper-cpp-windows-x64.zip
+          Get-ChildItem pkg | Format-Table Name, Length
+      - name: Test on the CPU
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:TEST_MODEL -OutFile tiny.bin
+          $server = Start-Process pkg\whisper-server.exe -ArgumentList "-m", "tiny.bin", "--port", "8080", "-nlp", "-ng" -PassThru -RedirectStandardError server.log
+          for ($i = 0; $i -lt 60; $i++) { try { if ((Invoke-RestMethod http://127.0.0.1:8080/health).status -eq "ok") { break } } catch {}; Start-Sleep 1 }
+          $text = curl.exe -fs http://127.0.0.1:8080/inference -F file=@pkg/jfk.wav -F language=en
+          Stop-Process $server
+          "CPU: $text"
+          if ($text -notmatch "fellow Americans") { Get-Content server.log; exit 1 }
+      - uses: actions/upload-artifact@v4
+        with: {name: windows, path: dist/*}
+
+  macos:
+    runs-on: macos-14  # Apple Silicon: whisper.cpp uses its GPU through Metal
+    steps:
+      - name: Build
+        run: |
+          git clone --quiet --depth 1 --branch "$WHISPER_CPP_VERSION" https://github.com/ggml-org/whisper.cpp src
+          # One file: static libraries, the Metal shaders built in
+          cmake -S src -B out -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_SDL2=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
+          cmake --build out --target whisper-server -j 4
+          mkdir pkg dist
+          cp out/bin/whisper-server pkg/
+          cp src/LICENSE pkg/LICENSE-whisper.cpp
+          cp src/samples/jfk.wav pkg/
+          echo "whisper.cpp $WHISPER_CPP_VERSION (Metal), built $(date -u +%Y-%m-%d)" > pkg/VERSION
+          tar -czf dist/whisper-cpp-macos-arm64.tar.gz -C pkg .
+          otool -L pkg/whisper-server
+      - name: Test on the CPU and on Metal
+        run: |
+          curl -fsSL -o tiny.bin "$TEST_MODEL"
+          for device in -ng "-dev 0"; do
+            # shellcheck disable=SC2086  # $device is one or two words on purpose
+            pkg/whisper-server -m tiny.bin --port 8080 -nlp $device > server.log 2>&1 &
+            pid=$!
+            for _ in $(seq 60); do curl -fs http://127.0.0.1:8080/health | grep -q ok && break; sleep 1; done
+            text=$(curl -fs http://127.0.0.1:8080/inference -F file=@pkg/jfk.wav -F language=en)
+            echo "$device: $text"; grep -E "ggml_metal|backend" server.log | head -5 || true
+            kill "$pid"; wait "$pid" || true
+            echo "$text" | grep -qi "fellow Americans"
+          done
+      - uses: actions/upload-artifact@v4
+        with: {name: macos, path: dist/*}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/whisper-bin-v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # to create the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {path: dist, merge-multiple: true}
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum whisper-cpp-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "whisper.cpp $WHISPER_CPP_VERSION builds" \
+            --notes "whisper.cpp $WHISPER_CPP_VERSION's whisper-server, built from the official source by .github/workflows/whisper-cpp.yml for Live Caption's setup: Linux x64 and Windows x64 with Vulkan (AMD, Intel and NVIDIA GPUs) and portable CPU code, macOS Apple Silicon with Metal. whisper.cpp is MIT licensed (LICENSE-whisper.cpp in each archive)." \
+            whisper-cpp-* SHA256SUMS

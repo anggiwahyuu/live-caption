@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import sys
 import threading
 from pathlib import Path
 
 import numpy as np
 
+from . import whispercpp
 from .audio import AudioHub
 from .common import IS_MAC, IS_WINDOWS, SAMPLE_RATE
 
@@ -31,17 +33,42 @@ class Transcriber(threading.Thread):
         self.ui_q.put(("status", msg))
 
     def _load(self):
+        """-> (model, draft model, where it runs). Tries the engines in order; see _attempts."""
+        errors = []
+        self.cuda_error: str | None = None  # why the NVIDIA GPU couldn't be used, when it was tried
+        for engine, device in self._attempts():
+            try:
+                if engine == "whisper.cpp":
+                    return self._load_whispercpp()
+                return self._load_faster_whisper(device)
+            except Exception as e:
+                errors.append(f"{engine} {device or ''}: {e}".replace("  ", " "))
+                if device == "cuda":
+                    self.cuda_error = str(e)
+        raise RuntimeError("Failed to load the model. " + " | ".join(errors))
+
+    def _attempts(self) -> list[tuple[str, str | None]]:
+        """auto: an NVIDIA GPU with faster-whisper first (CUDA), else whisper.cpp when setup installed it
+        (AMD/Intel/NVIDIA GPUs through Vulkan, Apple GPUs through Metal, or its faster CPU code),
+        else faster-whisper on the CPU."""
+        engine, device = self.args.engine, self.args.device
+        if engine == "whisper.cpp":
+            return [("whisper.cpp", None)]
+        cuda = device == "cuda" or (device == "auto" and not IS_MAC)  # CTranslate2 has no GPU support on macOS
+        attempts = [("faster-whisper", "cuda")] if cuda else []
+        if device == "cuda":
+            return attempts
+        if engine == "auto" and whispercpp.installed():
+            attempts.append(("whisper.cpp", None))
+        return attempts + [("faster-whisper", "cpu")]
+
+    def _load_faster_whisper(self, device: str):
         add_cuda_dll_dirs()
         from faster_whisper import WhisperModel
 
-        if self.args.device == "cpu" or (IS_MAC and self.args.device == "auto"):  # CTranslate2 has no GPU support on macOS
-            attempts = [("cpu", "int8")]
-        elif self.args.device == "cuda":
-            attempts = [("cuda", self.args.compute_type)]
-        else:  # auto: try the GPU first, fall back to the CPU if it fails
-            attempts = [("cuda", self.args.compute_type), ("cpu", "int8")]
+        compute_type = self.args.compute_type if device == "cuda" else "int8"
 
-        def load_one(name, device, compute_type):
+        def load_one(name):
             self._status(f"Loading model '{name}' on {device.upper()} ({compute_type})…")
             model = WhisperModel(name, device=device, compute_type=compute_type)
             # Warm-up: make sure cuBLAS/cuDNN actually work, not just that they were detected.
@@ -49,21 +76,36 @@ class Transcriber(threading.Thread):
             list(segments)
             return model
 
-        errors = []
-        for device, compute_type in attempts:
-            try:
-                model = load_one(self.args.model, device, compute_type)
-                draft_name = self.args.draft_model
-                if draft_name in ("same", self.args.model) or not self.args.draft_interval:
-                    return model, model, device
-                try:
-                    return model, load_one(draft_name, device, compute_type), device
-                except Exception as e:  # draft model failed (VRAM full, etc.): use the main model only
-                    self.ui_q.put(("error", f"Draft model '{draft_name}' failed to load, using '{self.args.model}': {e}"))
-                    return model, model, device
-            except Exception as e:
-                errors.append(f"{device}: {e}")
-        raise RuntimeError("Failed to load the model. " + " | ".join(errors))
+        return self._with_draft(load_one, device.upper())
+
+    def _load_whispercpp(self):
+        setting = "cpu" if self.args.device == "cpu" else self.args.whispercpp_device
+        gpu = whispercpp.choose_device(setting, whispercpp.list_gpus() if setting != "cpu" else [])
+        role = iter(("final", "draft"))
+
+        def load_one(name):
+            def progress(done, total):
+                self._status(f"Downloading whisper.cpp model '{name}' {100 * done // max(total, 1)}%…")
+            path = whispercpp.ensure_model(name, progress)
+            self._status(f"Loading model '{name}' with whisper.cpp…")
+            server = whispercpp.WhisperCppServer(path, gpu, log=whispercpp.install_dir() / f"server-{next(role)}.log")
+            server.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), language="en")  # warm-up
+            return server
+
+        model, draft, _ = self._with_draft(load_one, "")
+        return model, draft, model.device_name()
+
+    def _with_draft(self, load_one, where: str):
+        """Loads the main model, then the draft model (unless it's the same one or drafts are off)."""
+        model = load_one(self.args.model)
+        draft_name = self.args.draft_model
+        if draft_name in ("same", self.args.model) or not self.args.draft_interval:
+            return model, model, where
+        try:
+            return model, load_one(draft_name), where
+        except Exception as e:  # draft model failed (VRAM full, etc.): use the main model only
+            self.ui_q.put(("error", f"Draft model '{draft_name}' failed to load, using '{self.args.model}': {e}"))
+            return model, model, where
 
     def run(self) -> None:
         try:
@@ -75,11 +117,15 @@ class Transcriber(threading.Thread):
         lang = None if self.args.lang == "auto" else self.args.lang
         last_lang: dict[str, str] = {}  # label -> language of the last final sentence (for drafts with --lang auto)
         models = self.args.model if draft_model is model else f"{self.args.model} + draft {self.args.draft_model}"
-        ready = f"Ready — {models} @ {device.upper()} · language: {self.args.lang}"
+        ready = f"Ready — {models} @ {device} · language: {self.args.lang}"
         self._status(ready)
-        if device == "cpu" and self.args.device != "cpu" and not IS_MAC:
+        if self.cuda_error and shutil.which("nvidia-smi"):  # an NVIDIA GPU is there, but CUDA failed
             launcher = "run.bat" if IS_WINDOWS else "./run.sh"
-            self.ui_q.put(("error", f"GPU unavailable, running on CPU (slower). Start the app with {launcher}"))
+            if device == "CPU":
+                self.ui_q.put(("error", f"NVIDIA GPU unavailable, running on CPU (slower). "
+                                        f"Start the app with {launcher}"))
+            else:
+                self.ui_q.put(("info", f"CUDA unavailable, so whisper.cpp runs on {device} instead"))
         lagging = False
         while not self.stop_event.is_set():
             item = self.hub.get(timeout=0.2)

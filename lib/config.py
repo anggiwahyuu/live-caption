@@ -145,6 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default="small",
                    help="tiny | base | small | medium | large-v3-turbo | distil-large-v3 (default: small)")
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    p.add_argument("--engine", default="auto", choices=["auto", "faster-whisper", "whisper.cpp"],
+                   help="Speech-to-text engine. auto = faster-whisper on an NVIDIA GPU, else whisper.cpp if setup "
+                        "installed it (AMD/Intel GPUs via Vulkan, Apple GPUs via Metal), else faster-whisper on the CPU")
+    p.add_argument("--whispercpp-device", default="auto",
+                   help="GPU for whisper.cpp: auto (a separate GPU if there is one, else the CPU), cpu, gpu, or gpu:N "
+                        "for GPU number N. Setup measures which is fastest and saves it")
     p.add_argument("--compute-type", default="int8",
                    help="Compute type on the GPU. int8 suits GTX 10xx (Pascal) best. (default: int8)")
     p.add_argument("--lang", default="auto", help="Speaker language code: id, en, ... or auto (default)")

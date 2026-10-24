@@ -26,6 +26,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import whispercpp
 from .common import IS_LINUX, IS_MAC, IS_WINDOWS
 from .config import config_dir, parse_args
 from .summary import Summarizer
@@ -454,20 +455,22 @@ def setup_claude(report: Report) -> None:
                    [("set" if IS_WINDOWS else "export") + f" ANTHROPIC_API_KEY=sk-ant-...   (or: ant auth login), before {RUN}"])
 
 
-def gpu_info(report: Report) -> None:
+def gpu_info(report: Report) -> bool:
+    """Reports the NVIDIA GPU; True when faster-whisper can use it (CUDA works)."""
     if IS_MAC:
-        return  # always the CPU, nothing to check
+        return False  # no CUDA on a Mac (whisper.cpp uses its GPU through Metal)
     if not shutil.which("nvidia-smi"):
-        report.add(SKIP, "NVIDIA GPU", "none found: speech-to-text runs on the CPU (try --model base if it falls behind)")
-        return
+        report.add(SKIP, "NVIDIA GPU", "none found")
+        return False
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
                              capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         out = None
     if out is None or out.returncode != 0 or not out.stdout.strip():
-        report.add(WARN, "NVIDIA GPU", "nvidia-smi doesn't work, so the CPU is used",
+        report.add(WARN, "NVIDIA GPU", "nvidia-smi doesn't work, so CUDA can't be used",
                    ["Check the NVIDIA driver (README step 1.1)"])
+        return False
     else:
         gpu = out.stdout.strip().splitlines()[0]
         try:
@@ -478,8 +481,119 @@ def gpu_info(report: Report) -> None:
         if cuda:
             report.add(OK, "NVIDIA GPU", f"{gpu}: README Step 9 lists the model that fits")
         else:
-            report.add(WARN, "NVIDIA GPU", f"{gpu}, but CUDA isn't usable from Python, so the CPU is used",
+            report.add(WARN, "NVIDIA GPU", f"{gpu}, but CUDA isn't usable from Python",
                        ["Check the NVIDIA driver and CUDA libraries (README step 1.1)"])
+        return cuda
+
+
+# ---- whisper.cpp (computers without CUDA)
+
+def _progress(what: str):
+    def show(done: int, total: int) -> None:
+        if total:
+            sys.stdout.write(f"\r   {what} {100 * done / total:3.0f}%  {done / 1e6:.0f} / {total / 1e6:.0f} MB ")
+            sys.stdout.flush()
+    return show
+
+
+def benchmark_whispercpp(model: Path) -> list[tuple[int | None, str, float]]:
+    """Seconds per 3-second sentence on every GPU whisper.cpp sees and on the CPU: [(gpu, name, seconds)].
+    Built-in graphics are often slower than the CPU, so setup measures instead of guessing."""
+    import statistics
+    import wave
+
+    import numpy as np
+
+    with wave.open(str(whispercpp.install_dir() / "jfk.wav")) as w:  # a sentence that comes with the build
+        audio = np.frombuffer(w.readframes(3 * w.getframerate()), np.int16).astype(np.float32) / 32768
+    results = []
+    for gpu in [g["index"] for g in whispercpp.list_gpus()] + [None]:
+        server = None
+        try:
+            server = whispercpp.WhisperCppServer(model, gpu, log=whispercpp.install_dir() / "server-setup.log")
+            server.transcribe(audio, language="en")  # warm-up (the GPU compiles its shaders on first use)
+            times = []
+            for _ in range(3):
+                start = time.perf_counter()
+                server.transcribe(audio, language="en")
+                times.append(time.perf_counter() - start)
+            results.append((gpu, server.device_name(), statistics.median(times)))
+            say(f"   {server.device_name()}: {results[-1][2]:.2f} s per sentence")
+        except Exception as e:  # this device doesn't work: the others may
+            say(f"   GPU {gpu if gpu is not None else 'CPU'}: doesn't work ({e})")
+        finally:
+            if server:
+                server.close()
+    return results
+
+
+def setup_whispercpp(args, report: Report, device_fixed: bool) -> bool:
+    """Installs whisper.cpp and its models and picks its fastest device. True when the app can use it."""
+    step("whisper.cpp (speech-to-text on AMD / Intel / Apple GPUs, or a faster CPU engine)")
+    part = "whisper.cpp"
+    fallback = "Captions still work: the app uses faster-whisper instead"
+    if whispercpp.asset_name() is None:
+        report.add(SKIP, part, "no build for this computer: faster-whisper runs on the CPU")
+        return False
+    marker = whispercpp.install_dir() / "RELEASE"
+    current = marker.read_text().strip() if marker.exists() else None
+    if whispercpp.installed() and current == whispercpp.RELEASE_TAG:
+        say(f"   {whispercpp.RELEASE_TAG}: already installed")
+    else:
+        say(f"   Downloading whisper.cpp ({whispercpp.RELEASE_TAG}) from GitHub…")
+        try:
+            version = with_retries("Downloading whisper.cpp",
+                                   lambda: whispercpp.install_binaries(_progress("whisper.cpp")),
+                                   permanent=lambda e: "404" in str(e) or "SHA256SUMS" in str(e))
+            marker.write_text(whispercpp.RELEASE_TAG)
+            say(f"\n   Installed: {version}")
+        except Exception as e:
+            if "404" in str(e):  # the release with the builds isn't there (yet)
+                fixes = [f"The whisper.cpp builds aren't published at {whispercpp.release_url('')} "
+                         f"(release {whispercpp.RELEASE_TAG}): see .github/workflows/whisper-cpp.yml", fallback]
+            else:
+                fixes = [f"Check the internet connection and run {SETUP} again", fallback]
+            report.add(WARN, part, f"couldn't install it: {e}", fixes)
+            return False
+
+    names = [args.model]
+    if args.draft_interval and args.draft_model not in ("same", args.model):
+        names.append(args.draft_model)
+    for name in names:
+        try:
+            path = whispercpp.model_path(name)
+            if path.is_file():
+                say(f"   {path.name}: already downloaded")
+            else:
+                with_retries(f"Downloading {name}", lambda: whispercpp.ensure_model(name, _progress(path.name)),
+                             permanent=lambda e: isinstance(e, ValueError))
+                say("")
+        except Exception as e:
+            main = name == args.model
+            report.add(WARN if main else SKIP, f"{part} model '{name}'", f"not downloaded: {e}",
+                       [f"Run {SETUP} again", fallback] if main else ["The app uses the main model for drafts too"])
+            if main:
+                return False
+
+    config = args._config_path or config_dir() / "config.toml"
+    if args.engine == "whisper.cpp":  # asked for by name: the app must use it too, even with a working CUDA
+        save_setting(config, "engine", "whisper.cpp")
+    if device_fixed:
+        report.add(OK, part, f"ready, on the device set in your settings ({args.whispercpp_device})")
+        return True
+    say("   Measuring which is fastest here…")
+    results = benchmark_whispercpp(whispercpp.model_path(args.model))
+    if not results:
+        report.add(WARN, part, "installed, but it didn't run on this computer", [fallback,
+                   f"Details: {whispercpp.install_dir() / 'server-setup.log'}"])
+        return False
+    gpu, name, seconds = min(results, key=lambda r: r[2])
+    others = ", ".join(f"{n} {s:.2f} s" for g, n, s in results if g != gpu)
+    value = "cpu" if gpu is None else f"gpu:{gpu}"
+    save_setting(config, "whispercpp-device", value)
+    report.add(OK, part, f"{name}, {seconds:.2f} s per sentence" + (f" (also tried: {others})" if others else "")
+               + f'; saved whispercpp-device = "{value}"')
+    return True
 
 
 def want_summary(own) -> bool:
@@ -505,14 +619,20 @@ def main(argv: list[str] | None = None) -> int:
     ASSUME_YES = own.yes
     args = parse_args(app_argv)  # the same settings the app gets: config.toml, then these options
 
+    # The device for whisper.cpp was chosen by hand (command line or config.toml): don't measure over it.
+    device_fixed = args.whispercpp_device != "auto"
+
     report = Report()
     report.add(OK, "Python packages", "ready")
     try:
-        gpu_info(report)
+        cuda = gpu_info(report)
         if own.no_whisper or own.summary_only:
             report.add(SKIP, "Whisper models", f"skipped ({RUN} downloads them on its first start)")
         else:
-            setup_whisper(args, report)
+            # Without CUDA, whisper.cpp is the engine (it falls back to faster-whisper if it can't be installed).
+            wants_whispercpp = args.engine == "whisper.cpp" or (args.engine == "auto" and not cuda)
+            if not (wants_whispercpp and setup_whispercpp(args, report, device_fixed)):
+                setup_whisper(args, report)
         step(f"Summary model ({args.summarizer})")
         if not want_summary(own):
             report.add(SKIP, "Summary model", f"skipped (add it later: {SETUP} --summary-only)")

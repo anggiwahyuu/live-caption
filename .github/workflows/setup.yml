@@ -100,6 +100,57 @@ jobs:
           # setup.sh must have used the distribution's Python (smooth fonts), not uv's own
           .venv/bin/python -c "import sys; assert '/uv/python/' not in sys.base_prefix, sys.base_prefix"
 
+  nvidia-update:
+    # Updating an older setup on an NVIDIA computer. torch's CUDA build had brought cuDNN for CUDA 13, whose files
+    # share nvidia/cudnn/lib with ours: removing it took ours along, and the app fell back to the CPU. The runner
+    # has no GPU, so a stand-in nvidia-smi sends setup.sh down the NVIDIA path; the check is on the library files.
+    name: Ubuntu, update of an older NVIDIA setup
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash  # with pipefail, for the | tee
+    steps:
+      - uses: actions/checkout@v5
+      - name: New lock files to test
+        if: inputs.locks
+        uses: actions/download-artifact@v4
+        with: {name: "${{ inputs.locks }}"}
+      - name: A stand-in nvidia-smi
+        run: |
+          mkdir -p "$HOME/fake-nvidia"
+          printf '#!/bin/sh\necho "NVIDIA GeForce GTX 1050, 4096 MiB"\n' > "$HOME/fake-nvidia/nvidia-smi"
+          chmod +x "$HOME/fake-nvidia/nvidia-smi"
+          echo "$HOME/fake-nvidia" >> "$GITHUB_PATH"
+      - name: The environment older setups left (torch's CUDA build; CUDA 12 and 13 libraries side by side)
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv --python /usr/bin/python3 .venv
+          uv pip install --python .venv/bin/python faster-whisper torch nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+          uv pip list --python .venv/bin/python | grep -iE '^(torch|nvidia-cudnn)'
+          uv pip list --python .venv/bin/python | grep -q nvidia-cudnn-cu13 \
+            || echo "::warning::torch no longer brings nvidia-cudnn-cu13, so this job no longer recreates the old clash"
+      - name: setup.sh
+        run: ./setup.sh $SETUP_ARGS --no-whisper --no-shortcut | tee setup.log
+      - name: The CUDA libraries are complete, torch is the CPU build
+        run: |
+          grep "Repairing the CUDA libraries" setup.log || echo "(no repair was needed)"
+          .venv/bin/python - <<'EOF'
+          import importlib.metadata as md, os
+          import nvidia.cublas.lib, nvidia.cudnn.lib
+          for lib, name in ((nvidia.cublas.lib, "libcublas.so.12"), (nvidia.cudnn.lib, "libcudnn.so.9")):
+              assert any(os.path.exists(os.path.join(p, name)) for p in lib.__path__), f"{name} is missing"
+          assert md.version("torch").endswith("+cpu"), f"torch {md.version('torch')} is not the CPU build"
+          unused = sorted(n for d in md.distributions() if (n := d.metadata["Name"].lower()).startswith("nvidia-")
+                          and not n.endswith("-cu12"))
+          assert not unused, f"CUDA libraries nothing uses: {unused}"
+          print("CUDA 12 libraries complete; torch", md.version("torch"))
+          EOF
+      - name: setup.sh again (nothing left to repair)
+        run: |
+          ./setup.sh $SETUP_ARGS --no-whisper --no-shortcut | tee setup-again.log
+          if grep -q "Repairing the CUDA libraries" setup-again.log; then exit 1; fi
+
   windows:
     name: Windows
     runs-on: windows-latest

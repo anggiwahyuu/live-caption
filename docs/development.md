@@ -41,7 +41,7 @@ Other files:
 | `requirements*.txt`, `requirements*.lock` | The Python libraries, and their tested versions ([Library versions](#library-versions)) |
 | `tools/build-whisper-cpp.sh` | The Linux build of whisper.cpp ([Building whisper.cpp](#building-whispercpp)) |
 | `tools/lock-requirements.sh` | Writes the `.lock` files |
-| `.github/workflows/setup.yml` | Runs the setup scripts on Ubuntu, Debian, Fedora, Arch, openSUSE, macOS and Windows, twice, then starts the app and Whisper |
+| `.github/workflows/setup.yml` | Runs the setup scripts on Ubuntu, Debian, Fedora, Arch, openSUSE, macOS and Windows, twice, then starts the app and Whisper; and updates an environment an older setup left on an NVIDIA computer (with a stand-in `nvidia-smi`), checking the CUDA libraries survive |
 | `.github/workflows/whisper-cpp.yml` | Builds and tests whisper.cpp for Linux, Windows and macOS, and publishes it as a release |
 | `.github/workflows/lock.yml` | Monthly update of the `.lock` files, tested before it's proposed |
 

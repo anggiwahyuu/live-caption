@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -16,12 +17,60 @@ from .audio import AudioHub
 from .common import IS_MAC, IS_WINDOWS, SAMPLE_RATE
 
 
-# Phrases Whisper often "hallucinates" on short/near-silent audio (Indonesian and English output).
-HALLUCINATIONS = {
-    "terima kasih", "terima kasih.", "terima kasih telah menonton.",
-    "sampai jumpa di video berikutnya.", "thank you", "thank you.",
-    "thanks for watching!", "thanks for watching.", "you", "...",
-}
+def normalize(text: str) -> str:
+    """Lower case, without punctuation: "Thank you!" and "thank you." are the same phrase."""
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+# Whole texts Whisper often "hallucinates" on (nearly) silent audio: the endings of the videos it learned from.
+# People do say some of them ("Terima kasih."), so they're only dropped for audio shorter than SHORT_SECONDS: said
+# for real, they take about 2 s with the pauses around them; a longer clip with only these words in it is noise.
+SHORT_SECONDS = 6
+HALLUCINATIONS = {normalize(phrase) for phrase in (
+    # Indonesian, Malay
+    "Terima kasih.", "Terima kasih telah menonton.", "Terima kasih sudah menonton.",
+    "Sampai jumpa di video berikutnya.", "Jangan lupa like dan subscribe.", "Terima kasih kerana menonton.",
+    # English
+    "Thank you.", "Thanks for watching!", "Thank you for watching.", "Thank you so much for watching.",
+    "Please subscribe.", "See you in the next video.", "Bye.", "You",
+    # Japanese, Chinese, Korean
+    "ご視聴ありがとうございました", "ご清聴ありがとうございました", "ありがとうございました",
+    "谢谢观看", "感谢观看", "謝謝觀看", "谢谢", "謝謝",
+    "시청해주셔서 감사합니다", "감사합니다", "구독과 좋아요 부탁드립니다",
+    # Spanish, Portuguese, Italian, French, German, Dutch, Russian
+    "Gracias.", "Gracias por ver.", "Gracias por ver el video.", "Muchas gracias.", "¡Suscríbete!",
+    "Obrigado.", "Obrigada.", "Obrigado por assistir.",
+    "Grazie.", "Grazie per la visione.",
+    "Merci.", "Merci d'avoir regardé.", "Merci d'avoir regardé cette vidéo.",
+    "Danke.", "Vielen Dank.", "Danke fürs Zuschauen.", "Vielen Dank fürs Zuschauen.", "Bis zum nächsten Mal.",
+    "Bedankt voor het kijken.",
+    "Спасибо.", "Спасибо за просмотр.", "Продолжение следует...",
+)}
+# Subtitle credits from the TV subtitles Whisper learned from: nobody says these in a meeting, so a text that
+# contains one is dropped whatever its length.
+CREDITS = tuple(normalize(c) for c in (
+    "Amara.org", "Untertitel im Auftrag des ZDF", "Untertitelung des ZDF", "Sous-titrage ST'",
+    "Sous-titres réalisés", "Субтитры сделал", "Субтитры подогнал", "Редактор субтитров",
+    "请不吝点赞", "明镜与点点", "字幕製作人", "字幕制作人", "字幕by", "字幕由", "字幕提供", "Zither Harp",
+    "Sottotitoli e revisione a cura di", "Copyright WDR", "Субтитры субтитров",
+))
+# Sound labels from the same subtitles ("[Music]", "MUZIEK."), and German broadcasters' credits ("SWR 2020"):
+# dropped whatever their length, but only as the whole text.
+SOUND_LABELS = {normalize(label) for label in (
+    "Music", "Muziek", "Musik", "Musique", "Música", "Musica", "Музыка", "音乐", "音楽", "음악",
+    "Applause", "Applaus", "Laughter",
+)}
+BROADCASTER = re.compile(r"(copyright )?(ard|br|hr|mdr|ndr|swr|wdr|zdf)( \d{4})?")
+
+
+def is_hallucination(text: str, seconds: float) -> bool:
+    """True for a text that's only punctuation, a subtitle credit or sound label, or a typical phrase on short audio."""
+    norm = normalize(text)
+    if not norm or any(credit in norm for credit in CREDITS):
+        return True
+    if norm in SOUND_LABELS or BROADCASTER.fullmatch(norm):
+        return True
+    return norm in HALLUCINATIONS and seconds < SHORT_SECONDS
 
 
 class Transcriber(threading.Thread):
@@ -155,7 +204,7 @@ class Transcriber(threading.Thread):
                     self.ui_q.put(("drop", label, seg_id))
                 continue
 
-            useless = not text or (text.lower() in HALLUCINATIONS and len(audio) < SAMPLE_RATE * 3)
+            useless = not text or is_hallucination(text, len(audio) / SAMPLE_RATE)
             if final:
                 if useless:
                     self.ui_q.put(("drop", label, seg_id))  # remove its draft from the screen

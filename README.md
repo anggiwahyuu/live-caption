@@ -655,7 +655,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 - **`Recording 'Me' lost at 10:42:05 … Reconnecting…`**: the device disconnected mid-meeting (Bluetooth headset, unplugged USB microphone, restarted sound server). The app keeps trying every few seconds and records again by itself, from the default device of that moment; `Recording 'Me' again from …` marks where the gap ends in the transcript. Nothing to do unless it never comes back: then check the device in the system's sound settings.
 - **Window doesn't stay on top (Wayland)**: KDE: right-click the title bar → *More Actions* → *Keep Above Others*. GNOME (Ubuntu, Fedora): right-click the title bar → *Always on Top*.
 - **Status "N sentences behind"**: the GPU can't keep up. Try `--draft-interval 0.5`, `--draft-model tiny`, or a smaller main model.
-- **Odd text like "Terima kasih." / "Thank you." during silence**: a typical Whisper hallucination. Some of it is already filtered; raise `--threshold` if it still happens often.
+- **Odd text like "Terima kasih." / "Thank you." during silence**: a typical Whisper hallucination, from the videos it learned from. The app drops the usual ones in Indonesian, Malay, English, Japanese, Chinese, Korean, Spanish, Portuguese, Italian, French, German, Dutch and Russian: such a phrase when it's all that was heard in under 6 seconds, and subtitle credits ("Amara.org", "Субтитры сделал…") or sound labels ("[Music]") always. If something else still shows up often, raise `--threshold`.
 
 ### Windows
 
@@ -678,7 +678,6 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 ## Known limitations
 
 - **Switching the default output on Windows mid-meeting** likely keeps recording the old device, so restart the app after switching. (A device that disconnects or is unplugged is handled: see [Troubleshooting](#troubleshooting).)
-- **Hallucination filter covers Indonesian and English only.** Fake phrases Whisper produces during silence (like "Thank you for watching") are filtered only in those two languages. For other languages, raise `--threshold` if they show up often.
 - **Moving or renaming the project folder breaks `source .venv/bin/activate`**, because the virtualenv stores its absolute path. `./run.sh` and `run.bat` keep working since they call the venv's python directly. To fix `activate`, delete `.venv` and recreate it with the installation steps above.
 - **Windows and macOS support is untested** on real hardware (see sections 2 and 3).
 

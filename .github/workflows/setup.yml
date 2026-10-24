@@ -5,9 +5,15 @@ name: setup
 
 on:
   push:
-    paths: [setup.sh, setup.ps1, requirements.txt, requirements-nvidia.txt, run.sh, run.bat, live_caption.py, "lib/**", .github/workflows/setup.yml]
+    paths: [setup.sh, setup.ps1, "requirements*", run.sh, run.bat, live_caption.py, "lib/**", .github/workflows/setup.yml]
   pull_request:
   workflow_dispatch:
+  workflow_call:  # by lock.yml, to test new lock files before proposing them
+    inputs:
+      locks:
+        description: An artifact of this run with requirements*.lock files to use instead of the committed ones
+        type: string
+        required: false
 
 env:
   # A tiny Whisper model keeps the download small; draft and final text then share it.
@@ -32,6 +38,10 @@ jobs:
           - {name: macOS, os: macos-latest}
     steps:
       - uses: actions/checkout@v5
+      - name: New lock files to test
+        if: inputs.locks
+        uses: actions/download-artifact@v4
+        with: {name: "${{ inputs.locks }}"}
       - name: setup.sh
         run: ./setup.sh $SETUP_ARGS
       - name: setup.sh again (nothing left to do)
@@ -69,6 +79,10 @@ jobs:
           - {name: openSUSE Tumbleweed, image: "opensuse/tumbleweed:latest"}
     steps:
       - uses: actions/checkout@v5
+      - name: New lock files to test
+        if: inputs.locks
+        uses: actions/download-artifact@v4
+        with: {name: "${{ inputs.locks }}"}
       - name: Refresh the package lists
         if: matrix.prepare
         run: ${{ matrix.prepare }}
@@ -92,6 +106,10 @@ jobs:
         shell: powershell  # Windows PowerShell 5.1, the one every Windows PC has
     steps:
       - uses: actions/checkout@v5
+      - name: New lock files to test
+        if: inputs.locks
+        uses: actions/download-artifact@v4
+        with: {name: "${{ inputs.locks }}"}
       - name: setup.ps1
         run: |
           powershell -ExecutionPolicy Bypass -File setup.ps1 $env:SETUP_ARGS.Split(" ")

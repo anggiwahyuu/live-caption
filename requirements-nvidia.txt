@@ -1,4 +1,4 @@
 # CUDA libraries for faster-whisper on NVIDIA GPUs (Linux/Windows; recent CTranslate2 needs CUDA 12 + cuDNN 9).
-# setup.sh / setup.ps1 install them when nvidia-smi works; by hand: uv pip install -r requirements-nvidia.txt
+# setup.sh / setup.ps1 install them (pinned in requirements-nvidia.lock) when nvidia-smi works.
 nvidia-cublas-cu12; sys_platform != "darwin"
 nvidia-cudnn-cu12==9.*; sys_platform != "darwin"

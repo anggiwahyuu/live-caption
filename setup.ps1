@@ -59,6 +59,9 @@ if (-not (Have "uv")) {
     Read-RegistryPath
 }
 if (-not (Have "uv")) { Fail "uv was installed but isn't on PATH: open a new PowerShell window and run setup.ps1 again." }
+if (-not ((uv pip sync --help) -match "--torch-backend")) {
+    Fail "This uv ($(uv --version)) is too old: run 'uv self update' (or 'winget upgrade astral-sh.uv'), then setup.ps1 again."
+}
 
 # ---------------------------------------------------------------------------- 2. Python environment
 Step "Python environment (.venv)"
@@ -73,20 +76,21 @@ if (Test-Path $py) {
     Run { uv venv --python 3.12 .venv } "Creating the virtualenv"
 }
 Note "Installing the Python libraries (first time: about 1 GB)..."
-Run { uv pip install --python $py -r requirements.txt } "Installing the Python libraries"
 $nvidia = $false
 if (Have "nvidia-smi") { nvidia-smi *> $null; $nvidia = $LASTEXITCODE -eq 0 }
+$locks = @("requirements.lock")
 if ($nvidia) {
-    Note "NVIDIA GPU found: installing its CUDA libraries (cuBLAS, cuDNN; about 2 GB)..."
-    Run { uv pip install --python $py -r requirements-nvidia.txt } "Installing the CUDA libraries"
-} else {
-    # Earlier setups installed them on every computer.
-    $unused = @(uv pip list --python $py --format freeze 2>$null | ForEach-Object { ($_ -split "==")[0] } |
-                Where-Object { $_ -like "nvidia-*" })
-    if ($unused.Count -gt 0) {
-        Note "Removing $($unused.Count) CUDA libraries nothing uses..."
-        Run { uv pip uninstall --python $py @unused } "Removing the CUDA libraries"
-    }
+    Note "NVIDIA GPU found: with its CUDA libraries (cuBLAS, cuDNN; about 2 GB more)"
+    $locks += "requirements-nvidia.lock"
+}
+# The tested versions from the lock files (tools/lock-requirements.sh), exactly: sync also removes what they
+# don't list, such as the CUDA libraries earlier setups installed on every computer. torch only serves offline
+# translation's sentence splitter, on the CPU: --torch-backend cpu.
+uv pip sync --python $py --torch-backend cpu @locks
+if ($LASTEXITCODE -ne 0) {
+    Note "The tested versions didn't install: installing the newest ones instead (requirements.txt)."
+    Run { uv pip install --python $py --torch-backend cpu -r requirements.txt } "Installing the Python libraries"
+    if ($nvidia) { Run { uv pip install --python $py -r requirements-nvidia.txt } "Installing the CUDA libraries" }
 }
 
 # ---------------------------------------------------------------------------- 3. Start menu shortcut

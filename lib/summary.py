@@ -270,6 +270,16 @@ class Summarizer:
             return self._claude(system, user)
         return self._ollama(system, user, self._num_ctx(user))
 
+    def complete(self, system: str, user: str, schema: dict | None = None) -> str:
+        """One answer from the model (ask.py). schema: a JSON schema Ollama holds the answer to; Claude only
+        gets the instructions in the prompt."""
+        if self.provider == "claude":
+            return self._claude(system, user)
+        # In steps of 4096: a new num_ctx makes Ollama reload the model, so questions of different lengths
+        # about the same transcript keep the same one.
+        num_ctx = min(32768, -(-self._num_ctx(user) // 4096) * 4096)
+        return self._ollama(system, user, num_ctx, temperature=0.0, fmt=schema)
+
     @staticmethod
     def _num_ctx(text: str) -> int:
         # Ollama's default context window (2–4k tokens) silently cuts long transcripts: size it to the input.
@@ -357,7 +367,7 @@ class Summarizer:
         except anthropic.APIConnectionError:
             raise RuntimeError("Claude API: network error. Check your internet connection.")
         if message.stop_reason == "refusal":
-            raise RuntimeError("Claude declined to summarize this transcript.")
+            raise RuntimeError("Claude declined to work on this transcript.")
         text = "".join(b.text for b in message.content if b.type == "text").strip()
         if message.stop_reason == "max_tokens":
             text += "\n\n_(summary cut off)_"

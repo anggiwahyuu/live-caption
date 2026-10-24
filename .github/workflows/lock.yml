@@ -1,0 +1,64 @@
+# Once a month: updates requirements.lock / requirements-nvidia.lock (the exact versions setup installs) to the
+# newest releases, runs the setup workflow with them on every OS, and only when that passes proposes them as a
+# pull request from the branch lock-update. Nothing changes on main until that pull request is merged.
+#
+# Creating the pull request needs: Settings -> Actions -> General -> "Allow GitHub Actions to create and approve
+# pull requests". Without it the branch is still pushed, and the run says where to open the pull request.
+name: update locked versions
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"  # the 1st of every month
+  workflow_dispatch:
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.lock.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - id: lock
+        run: |
+          tools/lock-requirements.sh --upgrade
+          if git diff --quiet -- requirements.lock requirements-nvidia.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"; echo "Nothing newer."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff -U0 -- requirements.lock requirements-nvidia.lock | grep -E '^[-+][a-z0-9]' || true
+          fi
+      - if: steps.lock.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with: {name: locks, path: "requirements*.lock"}
+
+  test:
+    needs: lock
+    if: needs.lock.outputs.changed == 'true'
+    uses: ./.github/workflows/setup.yml
+    with: {locks: locks}
+
+  pull-request:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to push the branch
+      pull-requests: write   # to open the pull request
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with: {name: locks}
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C lock-update
+          git commit -qam "chore: update locked library versions"
+          git push -qf origin lock-update
+          if gh pr view lock-update --json state -q .state 2>/dev/null | grep -q OPEN; then
+            echo "The open pull request from lock-update now has these versions."
+          elif ! gh pr create --head lock-update --title "Update locked library versions" --body \
+              "Newest versions from \`tools/lock-requirements.sh --upgrade\`. The setup workflow passed with them on every OS: run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"; then
+            echo "::notice::Branch lock-update is pushed; open a pull request from it: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/lock-update"
+          fi

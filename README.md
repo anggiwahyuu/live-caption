@@ -170,9 +170,8 @@ The same on every distribution. The environment is built on **your distribution'
 ```bash
 cd live-caption
 uv venv --python /usr/bin/python3 .venv
-uv pip install torch --index-url https://download.pytorch.org/whl/cpu   # see below
-uv pip install -r requirements.txt
-uv pip install -r requirements-nvidia.txt   # only with an NVIDIA GPU (step 1.1)
+uv pip sync --torch-backend cpu requirements.lock                            # without an NVIDIA GPU
+uv pip sync --torch-backend cpu requirements.lock requirements-nvidia.lock   # with one (step 1.1)
 chmod +x run.sh
 ```
 
@@ -183,14 +182,12 @@ Already set up the environment with `uv venv --python 3.12` before? Recreate it 
 ```bash
 rm -rf .venv
 uv venv --python /usr/bin/python3 .venv
-uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-uv pip install -r requirements.txt
-uv pip install -r requirements-nvidia.txt   # only with an NVIDIA GPU
+uv pip sync --torch-backend cpu requirements.lock   # add requirements-nvidia.lock with an NVIDIA GPU
 ```
 
 If your distribution's Python is older than 3.10, use `uv venv --python 3.12 .venv` instead: everything works, only the text looks rough.
 
-This downloads about 1 GB, plus 2 GB of CUDA libraries with an NVIDIA GPU. The `torch` line comes first because torch (needed by offline translation, which runs on the CPU) would otherwise bring another ~2.5 GB of CUDA libraries it never uses. Whisper models are downloaded automatically on first run, to `~/.cache/huggingface`.
+This downloads about 1 GB, plus 2 GB of CUDA libraries with an NVIDIA GPU. The `.lock` files hold the exact versions that were tested ([Library versions](#library-versions)). `--torch-backend cpu` installs torch (needed by offline translation, which runs on the CPU) without the ~2.5 GB of CUDA libraries it would otherwise bring. Whisper models are downloaded automatically on first run, to `~/.cache/huggingface`.
 
 ## 2. Installation on Windows
 
@@ -209,8 +206,8 @@ This downloads about 1 GB, plus 2 GB of CUDA libraries with an NVIDIA GPU. The `
    ```powershell
    cd live-caption
    uv venv --python 3.12 .venv
-   uv pip install -r requirements.txt
-   uv pip install -r requirements-nvidia.txt   # only with an NVIDIA GPU (step 1)
+   uv pip sync --torch-backend cpu requirements.lock                            # without an NVIDIA GPU
+   uv pip sync --torch-backend cpu requirements.lock requirements-nvidia.lock   # with one (step 1)
    ```
 
    This also installs **PyAudioWPatch**, which records the audio of your default speakers/headset through WASAPI loopback. No virtual audio cable is needed.
@@ -247,7 +244,7 @@ macOS can't record system audio on its own, so a free virtual audio device calle
    ```bash
    cd live-caption
    uv venv --python 3.12 .venv
-   uv pip install -r requirements.txt
+   uv pip sync --torch-backend cpu requirements.lock   # Intel Mac: uv pip install -r requirements.txt
    chmod +x run.sh
    ```
 
@@ -369,6 +366,7 @@ The dot shows the state at a glance: **green** listening, **amber** paused, **re
 | **Always on top** | `⋯` menu | | Keeps the window above the meeting app, like subtitles |
 | **Auto summary** | `⋯` menu | | Makes the summary by itself after a silence and when you close the window ([Step 8](#step-8--meeting-summary)) |
 | **Alert words…** | `⋯` menu | | Tells you when someone says your name ([Alert words](#alert-words)) |
+| **Ask about the meeting…** | `⋯` menu | `Ctrl+K` | Ask a question, e.g. *when is the deadline?*, and get the answer with the lines it comes from ([Asking about the meeting](#asking-about-the-meeting)) |
 | **Search…** | `⋯` menu | `Ctrl+F` | Opens a search bar above the text (see below) |
 | **Meeting history…** | `⋯` menu | `Ctrl+H` | Past meetings: search all of them, summarize them ([Step 7](#step-7--transcript-and-closing-the-app)) |
 | **Save as…** | `⋯` menu | `Ctrl+S` | Saves a copy of the transcript elsewhere (`.md` or `.txt`), or exports subtitles (`.srt` or `.vtt`, see Step 7) |
@@ -476,6 +474,18 @@ export ANTHROPIC_API_KEY=sk-ant-...   # or: ant auth login
 The default model is `claude-opus-5-5`; change it with `--summary-model`. Each summary is billed to your API account (an hour-long meeting is roughly 15–20k input tokens).
 
 Summaries are written in the meeting's main language (the one Whisper detected for most of the speech). For an English meeting summarized in Indonesian, use `--summary-lang id` (or `summary-lang = "id"` in `config.toml`). Since speech-to-text makes mistakes and speakers aren't told apart (only **Me** vs **Participant**), check names and action items before sending the summary to others.
+
+### Asking about the meeting
+
+Joined late, or missed a part? `⋯` → **Ask about the meeting…** (or `Ctrl+K`) and type a question, in any language:
+
+- *Kapan deadline load test, dan siapa yang mengerjakan?*
+- *What was said about the server budget?*
+- *Apakah rilisnya jadi hari Jumat?*
+
+The summary model (Ollama, or Claude with `--summarizer claude`) reads everything said so far and answers in a sentence or three. Under the answer are the transcript lines it comes from, with their time; **click one** to scroll the main window to it, where it lights up for a moment. The app checks that these lines really are in the transcript: when the model "quotes" something nobody said, the answer is marked *check before relying on this answer*. Something not discussed gets an answer saying so.
+
+Questions and answers stay in that window (they aren't saved in the transcript). With `qwen2.5:7b` an answer takes about 10–20 seconds on a short meeting; follow-up questions are quicker, since Ollama keeps the transcript it already read. With Claude, the whole transcript is sent to Anthropic with every question.
 
 ### Step 9 — Choosing a model for your VRAM
 
@@ -665,7 +675,6 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 
 - **Switching the default output on Windows mid-meeting** likely keeps recording the old device, so restart the app after switching. (A device that disconnects or is unplugged is handled: see [Troubleshooting](#troubleshooting).)
 - **Hallucination filter covers Indonesian and English only.** Fake phrases Whisper produces during silence (like "Thank you for watching") are filtered only in those two languages. For other languages, raise `--threshold` if they show up often.
-- **Library versions aren't pinned.** `requirements.txt` lists package names only, so recreating the environment later may install newer versions. To lock today's versions: `uv pip compile requirements.txt -o requirements.lock`, then install with `uv pip install -r requirements.lock`.
 - **Moving or renaming the project folder breaks `source .venv/bin/activate`**, because the virtualenv stores its absolute path. `./run.sh` and `run.bat` keep working since they call the venv's python directly. To fix `activate`, delete `.venv` and recreate it with the installation steps above.
 - **Windows and macOS support is untested** on real hardware (see sections 2 and 3).
 
@@ -682,6 +691,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `transcriber.py` | Loading faster-whisper (GPU with CPU fallback) and turning audio into text; `--vocab` |
 | `translation.py` | Google / Argos translation of final lines |
 | `summary.py` | Meeting summaries with Ollama or the Claude API |
+| `ask.py`, `ask_window.py` | Questions about the meeting: the answer and the transcript lines that back it up (checked against the transcript); the Ask window |
 | `subtitles.py` | SRT / WebVTT export |
 | `export.py` | The summary as chat text, plain text and Word (`.docx`, built without extra packages) |
 | `history.py`, `history_window.py` | Reading past transcripts back, searching them, adding a summary to them; the Meeting history window |
@@ -695,7 +705,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `whispercpp.py` | The whisper.cpp engine for non-NVIDIA GPUs: downloading it, choosing the GPU, running `whisper-server` in the background; `tools/build-whisper-cpp.sh` and `.github/workflows/whisper-cpp.yml` build it |
 | `model_setup.py` | The model downloads of `setup.sh` / `setup.ps1`: Whisper, Ollama and the summary model, with checks and retries |
 
-Data flows one way: `audio` → `transcriber` → `ui` (→ `translation` / `summary` on demand). Modules talk through queues, so only the window modules (`ui`, `search_bar`, `summary_window`, `history_window`, `theme`) touch Tkinter, and only `main` knows all the pieces. What a window shows but doesn't draw (`transcript`, `history`, `export`, `alerts`) has no Tkinter in it, so it can be tested without a window. A new feature usually means one new module plus a few lines in `ui.py`, `config.py` (its options) and `main.py` (to wire it in).
+Data flows one way: `audio` → `transcriber` → `ui` (→ `translation` / `summary` on demand). Modules talk through queues, so only the window modules (`ui`, `search_bar`, `summary_window`, `history_window`, `ask_window`, `theme`) touch Tkinter, and only `main` knows all the pieces. What a window shows but doesn't draw (`transcript`, `history`, `export`, `alerts`, `ask`) has no Tkinter in it, so it can be tested without a window. A new feature usually means one new module plus a few lines in `ui.py`, `config.py` (its options) and `main.py` (to wire it in).
 
 ## Running the tests
 
@@ -707,6 +717,13 @@ The tests use only the Python standard library (`unittest`), so nothing extra ne
 ```
 
 They are lightweight and finish in about a second: no Whisper model, no audio recording, no window and no internet. They cover the audio pipeline (segmenting, pause, re-chunking, resampling), the Whisper settings (`--vocab`, draft vs. final), translation skipping, the transcript format and the summary (against a fake local Ollama server; the Claude API is not called).
+
+## Library versions
+
+`requirements.txt` and `requirements-nvidia.txt` name the libraries; `requirements.lock` and `requirements-nvidia.lock` pin every one of them, dependencies included, to the exact versions the setup workflow tested on every OS. Setup installs the lock files with `uv pip sync`, so the environment matches them exactly: a new release of faster-whisper or torch can't break an installation until it has been tested. If the lock files can't be installed (e.g. a Python too new for them), setup warns and installs the newest versions from `requirements.txt` instead. Intel Macs always use `requirements.txt`: today's torch has no build for them.
+
+- **Changed `requirements*.txt`?** Run `tools/lock-requirements.sh` and commit the `.lock` files with it. It changes only what the edit needs.
+- **Newer versions:** on the 1st of every month, the *update locked versions* workflow (`.github/workflows/lock.yml`) runs `tools/lock-requirements.sh --upgrade`, tests the result with the setup workflow on every OS, and when that passes opens a pull request from the branch `lock-update`. Merging it is the update. To let it open the pull request: Settings → Actions → General → *Allow GitHub Actions to create and approve pull requests*. Run it by hand from the Actions tab at any time.
 
 ## Ethics and privacy
 

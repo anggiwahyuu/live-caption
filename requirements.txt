@@ -1,3 +1,5 @@
+# The libraries the app needs. Setup installs the exact tested versions from requirements.lock: after editing
+# this file, run tools/lock-requirements.sh (README, "Library versions").
 faster-whisper>=1.1
 numpy
 # The CUDA libraries for NVIDIA GPUs (about 2 GB) are in requirements-nvidia.txt: setup only installs them
@@ -7,8 +9,8 @@ PyAudioWPatch; sys_platform == "win32"   # Windows: WASAPI loopback
 sounddevice; sys_platform == "darwin"    # macOS: CoreAudio (system audio via BlackHole)
 # Online translation (lightweight)
 deep-translator
-# Offline translation (--translator argos). Large dependencies (pulls in torch & stanza; on Linux, setup
-# installs torch's CPU build first, without the ~2.5 GB of CUDA libraries it would never use)
+# Offline translation (--translator argos). Large dependencies (pulls in torch & stanza; installed with
+# --torch-backend cpu: torch's CPU build, without ~2.5 GB of CUDA libraries it would never use)
 argostranslate
 # Meeting summaries with --summarizer claude (optional; the default, Ollama, needs no package)
 anthropic

@@ -1,6 +1,7 @@
 """The main window: status header, ⋯ menu, live captions with drafts and translations, alert words,
 and the meeting summary (on demand and automatic). The pieces it shows live elsewhere: the meeting's
-data in transcript.py, the search bar in search_bar.py, the summary window in summary_window.py."""
+data in transcript.py, the search bar in search_bar.py, the summary window in summary_window.py,
+the Ask window in ask_window.py."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import time
 from pathlib import Path
 
 from . import alerts, theme
+from .ask_window import AskWindow
 from .common import IS_MAC
 from .config import DEFAULT_GEOMETRY, load_window_state, restore_geometry, save_window_state
 from .history_window import HistoryWindow
@@ -41,6 +43,7 @@ class App:
         self.transcript = Transcript(args.out_dir)
         self.windows: list = []  # summary and history windows: they follow "Always on top"
         self.history: HistoryWindow | None = None
+        self.ask_win: AskWindow | None = None
 
         # summary
         self.summary_win = None                 # the live meeting's summary window
@@ -109,6 +112,7 @@ class App:
                                   variable=self.auto_var, command=self._toggle_auto_summary)
         self.menu.add_command(label="Alert words…", command=self._edit_alert_words)
         self.menu.add_separator()
+        self.menu.add_command(label="Ask about the meeting…", command=self._open_ask, accelerator=f"{mod_label}+K")
         self.menu.add_command(label="Search…", command=self._open_search, accelerator=f"{mod_label}+F")
         self.menu.add_command(label="Meeting history…", command=self._open_history, accelerator=f"{mod_label}+H")
         self.menu.add_command(label="Save as…", command=self._save_as, accelerator=f"{mod_label}+S")
@@ -135,7 +139,7 @@ class App:
         mod = "Command" if IS_MAC else "Control"
         shortcuts = {"p": self._toggle_pause, "t": self._toggle_translate_key,
                      "s": self._save_as, "l": self._clear, "m": self._summarize, "f": self._open_search,
-                     "h": self._open_history}
+                     "h": self._open_history, "k": self._open_ask}
         for key, fn in shortcuts.items():
             for k in (key, key.upper()):  # also works with Caps Lock on
                 for widget in (root, self.search.entry):  # on the entry too, so its own Ctrl+key editing keys don't run
@@ -171,6 +175,7 @@ class App:
         tag("alert", background=c["alert"], foreground="#ffffff", font=t.bold, lmargincolor=c["bg"])
         tag("match", background=c["match"])
         tag("match_cur", background=c["match_cur"], foreground="#ffffff")
+        tag("flash", background=c["match_cur"], foreground="#ffffff", lmargincolor=c["bg"])  # shown from the Ask window
 
     def _open_menu(self) -> None:
         self.menu.update_idletasks()
@@ -238,6 +243,9 @@ class App:
                     self._summary_done(msg[1])
                 elif kind == "summary_failed":
                     self._summary_failed(msg[1])
+                elif kind in ("answer", "answer_failed"):  # the Ask window's question
+                    if self.ask_win is not None and self.ask_win.alive():
+                        self.ask_win.on_message(kind, msg[1])
                 elif kind.startswith("history_summary"):  # a past meeting's summary (history window)
                     if self.history is not None:
                         self.history.on_message(kind, msg[1])
@@ -338,6 +346,9 @@ class App:
             pos = stop
         parts.append((f"{text[pos:]}\n", "body"))
         self._append(parts, mark=f"tr{line_id}")
+        # Where the text starts, for show_line. Right gravity: the previous line's translation, inserted here
+        # later, goes in front of it.
+        self.text.mark_set(f"line{line_id}", f"tr{line_id} -1c linestart")
         self.last_speaker, self.last_ts = label, ts
         self.last_line_at = time.monotonic()
         if spans:
@@ -446,6 +457,24 @@ class App:
             self._set_status(f"Failed to save: {e}", "err", always=True)
             return
         self._set_status(f"Saved: {path}{note}", "muted", always=True)
+
+    def _open_ask(self) -> None:
+        if self.ask_win is not None and self.ask_win.alive():
+            self.ask_win.show()
+            return
+        self.ask_win = AskWindow(self)
+        self.windows.append(self.ask_win.win)
+
+    def show_line(self, line_id: int) -> bool:
+        """Scrolls the captions to a line and highlights it for a moment. False when it's no longer on screen."""
+        mark = f"line{line_id}"
+        if line_id < self.view_floor or mark not in self.text.mark_names():
+            return False
+        self.text.tag_remove("flash", "1.0", "end")
+        self.text.tag_add("flash", mark, f"{mark} lineend")
+        self.text.see(mark)
+        self.root.after(2500, lambda: self.text.tag_remove("flash", "1.0", "end"))
+        return True
 
     def _open_history(self) -> None:
         if self.history is not None and self.history.alive():

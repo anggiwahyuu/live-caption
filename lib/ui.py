@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import alerts, theme
+from . import alerts, history, theme
 from .ask_window import AskWindow
 from .common import IS_MAC
 from .config import DEFAULT_GEOMETRY, load_window_state, restore_geometry, save_window_state
@@ -43,7 +43,7 @@ class App:
         self.transcript = Transcript(args.out_dir)
         self.windows: list = []  # summary and history windows: they follow "Always on top"
         self.history: HistoryWindow | None = None
-        self.ask_win: AskWindow | None = None
+        self.ask_wins: dict[Path | None, AskWindow] = {}  # Ask windows: None = this meeting, else a past one's file
 
         # summary
         self.summary_win = None                 # the live meeting's summary window
@@ -243,9 +243,8 @@ class App:
                     self._summary_done(msg[1])
                 elif kind == "summary_failed":
                     self._summary_failed(msg[1])
-                elif kind in ("answer", "answer_failed"):  # the Ask window's question
-                    if self.ask_win is not None and self.ask_win.alive():
-                        self.ask_win.on_message(kind, msg[1])
+                elif kind in ("answer", "answer_failed"):  # a question from an Ask window
+                    self._answer_done(kind, msg[1], msg[2])
                 elif kind.startswith("history_summary"):  # a past meeting's summary (history window)
                     if self.history is not None:
                         self.history.on_message(kind, msg[1])
@@ -459,11 +458,39 @@ class App:
         self._set_status(f"Saved: {path}{note}", "muted", always=True)
 
     def _open_ask(self) -> None:
-        if self.ask_win is not None and self.ask_win.alive():
-            self.ask_win.show()
+        self.open_ask(None)
+
+    def open_ask(self, meeting: history.Meeting | None) -> None:
+        """The Ask window of this meeting (None) or of a past one (from the history window)."""
+        key = None if meeting is None else meeting.path
+        win = self.ask_wins.get(key)
+        if win is not None and win.alive():
+            win.show()
             return
-        self.ask_win = AskWindow(self)
-        self.windows.append(self.ask_win.win)
+        self.ask_wins[key] = win = AskWindow(self, meeting)
+        self.windows.append(win.win)
+
+    def _answer_done(self, kind: str, meeting: Path | None, payload) -> None:
+        """An answer is saved in its meeting's transcript file, also when its Ask window was closed meanwhile."""
+        saved = None
+        if kind == "answer":
+            path = self.transcript.path if meeting is None else meeting
+            try:
+                if meeting is None:
+                    self.transcript.add_answer(payload.to_markdown())
+                    self.transcript.save()
+                else:
+                    history.add_answer(meeting, payload.to_markdown())
+                saved = f"Saved in {path.name}"
+            except OSError as e:
+                saved = f"Answer not saved: {e}"
+            if meeting is not None and self.history is not None and self.history.alive():
+                self.history.reload(keep=meeting)
+        win = self.ask_wins.get(meeting)
+        if win is not None and win.alive():
+            win.on_message(kind, payload, saved)
+        elif kind == "answer_failed":
+            self._set_status(f"Question not answered: {payload[1]}", "err", always=True)
 
     def show_line(self, line_id: int) -> bool:
         """Scrolls the captions to a line and highlights it for a moment. False when it's no longer on screen."""

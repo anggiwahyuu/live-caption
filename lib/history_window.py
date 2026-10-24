@@ -1,4 +1,5 @@
-"""The "Meeting history" window: past transcripts, a search across all of them, and their summaries."""
+"""The "Meeting history" window: past transcripts, a search across all of them, their summaries, and questions
+about them (ask_window.py)."""
 
 from __future__ import annotations
 
@@ -63,6 +64,8 @@ class HistoryWindow:
                                                                                                 padx=(0, 6))
         self.open_btn = ttk.Button(buttons, text="Open file", command=self._open_file)
         self.open_btn.pack(side="right", padx=(0, 6))
+        self.ask_btn = ttk.Button(buttons, text="Ask…", command=self._ask)
+        self.ask_btn.pack(side="right", padx=(0, 6))
         self.summary_btn = ttk.Button(buttons, text="Show summary", command=self._show_summary)
         self.summary_btn.pack(side="right", padx=(0, 6))
         self.summarize_btn = ttk.Button(buttons, text="✦  Summarize", style="Accent.TButton", command=self._summarize)
@@ -156,16 +159,35 @@ class HistoryWindow:
             for i in found[:200]:
                 self._insert_line(m.lines[i], words)
             if not found:
-                t.insert("end", "Found only in the summary.\n", "muted")
+                t.insert("end", "Found only in the summary or the questions.\n", "muted")
         elif m.summary:
             for kind, line in history_blocks(m.summary):
                 t.insert("end", line + "\n", "heading" if kind == "heading" else ())
+            self._insert_questions(m)
         else:
+            self._insert_questions(m)
             t.insert("end", "No summary yet: press Summarize. The first lines:\n", "muted")
             for line in m.lines[:PREVIEW_LINES]:
                 self._insert_line(line, [])
         t.configure(state="disabled")
         self._update_buttons(m)
+
+    def _insert_questions(self, m: history.Meeting) -> None:
+        """The questions asked about the meeting (ask.Answer.to_markdown), after its summary."""
+        if not m.questions:
+            return
+        t = self.text
+        t.insert("end", "Questions\n", "heading")
+        for row in m.questions.splitlines():
+            if row.startswith("### "):
+                t.insert("end", f"{row[4:]}\n", "Participant")
+            elif row.startswith("- "):
+                t.insert("end", f"    {row[2:]}\n", "muted")
+            elif row.startswith("_"):
+                t.insert("end", f"{row.strip('_')}\n", "muted")
+            elif row.strip():
+                t.insert("end", f"{row}\n")
+        t.insert("end", "\n")
 
     def _insert_line(self, line: history.Line, words: list[str]) -> None:
         t = self.text
@@ -185,6 +207,7 @@ class HistoryWindow:
     def _update_buttons(self, m: history.Meeting | None) -> None:
         busy = self.summarizing is not None
         self.open_btn.configure(state="normal" if m else "disabled")
+        self.ask_btn.configure(state="normal" if m and m.lines else "disabled")
         self.summary_btn.configure(state="normal" if m and m.summary else "disabled")
         self.summarize_btn.configure(state="normal" if m and m.lines and not busy else "disabled",
                                      text="✦  Summarize again" if m and m.summary else "✦  Summarize")
@@ -193,6 +216,10 @@ class HistoryWindow:
     def _open_file(self) -> None:
         if selected := self._selected():
             open_externally(selected[0].path)
+
+    def _ask(self) -> None:
+        if (selected := self._selected()) and selected[0].lines:
+            self.app.open_ask(selected[0])
 
     def _show_summary(self) -> None:
         if (selected := self._selected()) and selected[0].summary:

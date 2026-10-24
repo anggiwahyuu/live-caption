@@ -1,8 +1,10 @@
-"""Questions about the meeting ("when is the deadline?"), answered from the transcript by the summary model,
-together with the transcript lines that back the answer up. No Tkinter here: ask_window.py shows it."""
+"""Questions about a meeting ("when is the deadline?"), answered from the transcript by the summary model,
+together with the transcript lines that back the answer up, and saved in the transcript file's "## Questions"
+section. No Tkinter here: ask_window.py shows it."""
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import queue
 import re
@@ -16,8 +18,10 @@ MAX_SOURCES = 3
 ASK_SYSTEM = """You answer questions about a meeting, using only its transcript (live speech-to-text).
 Each line is "[HH:MM:SS] Speaker: text". "Me" is the person who recorded the meeting; "Participant" is everyone
 else (several people, not told apart). The transcript may contain recognition errors and cut-off sentences.
-Never invent facts, names, numbers or dates. If the transcript doesn't answer the question, say in one sentence
-that it wasn't discussed or wasn't clear."""
+Never invent facts, names, numbers or dates.
+People in the meeting often use other words than the question: a "requirement" may be something someone asked
+for, a "deadline" may be "by Thursday". Look for lines that answer the question in meaning, not only in wording.
+Only when no line does, say in one sentence that it wasn't discussed or wasn't clear."""
 
 ASK_TASK = """Question: {question}
 
@@ -50,6 +54,24 @@ class Answer:
     text: str
     sources: list[Source] = field(default_factory=list)
     unsupported: int = 0  # quotes the model gave that aren't in the transcript
+    asked: dt.datetime = field(default_factory=dt.datetime.now)
+
+    @property
+    def warning(self) -> str | None:
+        """What to tell the reader when no transcript line backs the answer up."""
+        if self.sources:
+            return None
+        if self.unsupported:
+            return "The lines it quoted aren't in the transcript: check before relying on this answer"
+        return "No transcript line given for this answer"
+
+    def to_markdown(self) -> str:
+        """The answer as it is saved in the transcript file, under "## Questions"."""
+        rows = [f"### {self.question}", "", f"_Asked on {self.asked:%Y-%m-%d %H:%M}_", "", self.text, ""]
+        rows += [f"- [{s.time}] {s.speaker}: {s.text}" for s in self.sources]
+        if self.warning:
+            rows.append(f"_{self.warning}._")
+        return "\n".join(rows).strip()
 
 
 def parse_answer(raw: str) -> tuple[str, list[str]]:
@@ -95,14 +117,16 @@ def ask(summarizer: Summarizer, transcript: str, question: str) -> Answer:
 
 
 class AskWorker(threading.Thread):
-    """Answers one question in the background: puts ("answer", Answer) or ("answer_failed", (question, error))."""
+    """Answers one question in the background: puts ("answer", meeting, Answer) or
+    ("answer_failed", meeting, (question, error)). meeting: None for the live one, else the past meeting's file."""
 
-    def __init__(self, summarizer: Summarizer, transcript: str, question: str, ui_q: queue.Queue):
+    def __init__(self, summarizer: Summarizer, transcript: str, question: str, ui_q: queue.Queue, meeting=None):
         super().__init__(daemon=True)
         self.summarizer, self.transcript, self.question, self.ui_q = summarizer, transcript, question, ui_q
+        self.meeting = meeting
 
     def run(self) -> None:
         try:
-            self.ui_q.put(("answer", ask(self.summarizer, self.transcript, self.question)))
+            self.ui_q.put(("answer", self.meeting, ask(self.summarizer, self.transcript, self.question)))
         except Exception as e:
-            self.ui_q.put(("answer_failed", (self.question, str(e))))
+            self.ui_q.put(("answer_failed", self.meeting, (self.question, str(e))))

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .subtitles import subtitle_cues, to_srt, to_vtt
 
+QUESTIONS_HEADING = "## Questions"  # read back by history.py
 # Month names are fixed so the file doesn't depend on the system locale.
 MONTHS = ["January", "February", "March", "April", "May", "June", "July",
           "August", "September", "October", "November", "December"]
@@ -23,6 +24,7 @@ class Transcript:
         # line id -> {"ts", "end", "label", "text", "lang", "tr"} (what subtitles.subtitle_cues reads)
         self.records: dict[int, dict] = {}
         self.summary: tuple[str, str] | None = None  # (note for its heading, Markdown) of the latest summary
+        self.answers: list[str] = []  # questions asked about the meeting, as Markdown (ask.Answer.to_markdown)
 
     @property
     def next_id(self) -> int:
@@ -43,6 +45,9 @@ class Transcript:
 
     def set_summary(self, text: str, note: str) -> None:
         self.summary = (note, text)
+
+    def add_answer(self, markdown: str) -> None:
+        self.answers.append(markdown)
 
     # ---- for the summarizer
     def for_summary(self) -> str:
@@ -67,6 +72,9 @@ class Transcript:
             lines.append(f"- **[{rec['ts']:%H:%M:%S}] {rec['label']}:** {rec['text']}")
             if rec["tr"]:
                 lines.append(f"  - _{rec['tr']}_")
+        if self.answers:  # last, so a summary added from the history window (history.write_summary) keeps them
+            lines += ["", QUESTIONS_HEADING, ""]
+            lines += "\n\n".join(self.answers).splitlines()
         return "\n".join(lines) + "\n"
 
     def save(self) -> None:

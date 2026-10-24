@@ -1,25 +1,31 @@
 """The "Ask about the meeting" window: a question box, and the answers with the transcript lines behind them.
-Clicking such a line scrolls the main window to it."""
+For the live meeting, clicking such a line scrolls the main window to it; for a past one (from the history
+window) the answers asked before are shown first. The main window saves every answer (ui.App._answer_done)."""
 
 from __future__ import annotations
 
+import re
+
+from . import history
 from .ask import Answer, AskWorker
 
 EXAMPLES = "e.g. “When is the deadline?” · “What was said about the server?” · “Who takes on the report?”"
 
 
 class AskWindow:
-    def __init__(self, app):
+    def __init__(self, app, meeting: history.Meeting | None = None):
+        """meeting: a past meeting from the history window; None = the one being transcribed."""
         import tkinter as tk
         from tkinter import ttk
 
         self.app = app
+        self.meeting = meeting
         c, theme = app.theme.colors, app.theme
         self.asking: str | None = None  # the question being answered
         self.links = 0                   # source lines shown so far (each has its own click tag)
 
         win = self.win = tk.Toplevel(app.root)
-        win.title("Ask about the meeting")
+        win.title("Ask about the meeting" if meeting is None else f"Ask about the meeting of {meeting.when}")
         win.geometry("640x460")
         win.minsize(420, 260)
         win.configure(bg=c["bg"])
@@ -53,6 +59,9 @@ class AskWindow:
         tag("link", underline=True)
         tag("note", foreground=c["muted"], font=theme.small, lmargin1=indent, spacing1=2)
         tag("err", foreground=c["err"], font=theme.small, spacing1=2)
+        tag("earlier", foreground=c["muted"], font=theme.small, spacing1=2)
+        if meeting is not None and meeting.questions:
+            self._show_earlier(meeting.questions)
 
     def alive(self) -> bool:
         return self.win.winfo_exists()
@@ -72,24 +81,41 @@ class AskWindow:
         self.text.configure(state="disabled")
         self.text.see("end")
 
+    def _show_earlier(self, questions: str) -> None:
+        """The questions asked about a past meeting before, as saved in its file (ask.Answer.to_markdown)."""
+        parts = []
+        for row in questions.splitlines():
+            if row.startswith("### "):
+                parts.append((f"{row[4:]}\n", "question"))
+            elif m := re.match(r"- \[([\d:]+)\] ([^:]+): (.*)", row):
+                parts += [(f"{m[1]}  ", ("source", "time")), (f"{m[2]}: ", "source"), (f"{m[3]}\n", "source")]
+            elif m := re.fullmatch(r"_(.+)_", row.strip()):
+                parts.append((f"{m[1]}\n", "earlier" if m[1].startswith("Asked on") else "note"))
+            elif row.strip():
+                parts.append((f"{row}\n", "answer"))
+        self._write(parts)
+
     def _ask(self) -> None:
         question = self.entry.get().strip()
         if not question or self.asking is not None:
             return
-        transcript = self.app.transcript.for_summary()
+        if self.meeting is None:
+            transcript, lines = self.app.transcript.for_summary(), self.app.transcript.next_id
+        else:
+            transcript, lines = self.meeting.transcript(), len(self.meeting.lines)
         if not transcript:
             self._set_status("Nothing has been said yet", "warn")
             return
         self.asking = question
         self.ask_btn.configure(state="disabled")
         self.entry.delete(0, "end")
-        lines = self.app.transcript.next_id
         self._set_status(f"Reading {lines} lines with {self.app.summarizer.describe()}…")
         self._write([(f"{question}\n", "question")])
-        AskWorker(self.app.summarizer, transcript, question, self.app.ui_q).start()
+        AskWorker(self.app.summarizer, transcript, question, self.app.ui_q,
+                  None if self.meeting is None else self.meeting.path).start()
 
-    def on_message(self, kind: str, payload) -> None:
-        """An AskWorker result, passed on by the main window."""
+    def on_message(self, kind: str, payload, saved: str | None) -> None:
+        """An AskWorker result, passed on by the main window after saving it. saved: where to, or why not."""
         self.asking = None
         self.ask_btn.configure(state="normal")
         if kind == "answer_failed":
@@ -100,19 +126,25 @@ class AskWindow:
         answer: Answer = payload
         parts = [(f"{answer.text}\n", "answer")]
         for source in answer.sources:
-            link = f"src{self.links}"
-            self.links += 1
+            if self.meeting is None:  # live: the line can be shown in the main window
+                link = f"src{self.links}"
+                self.links += 1
+                self.text.tag_bind(link, "<Button-1>", lambda _e, i=source.index: self._jump(i))
+                self.text.tag_bind(link, "<Enter>", lambda _e: self.text.configure(cursor="hand2"))
+                self.text.tag_bind(link, "<Leave>", lambda _e: self.text.configure(cursor="arrow"))
+                tags = ("source", "link", link)
+            else:
+                tags = "source"
             parts += [(f"{source.time}  ", ("source", "time")), (f"{source.speaker}: ", "source"),
-                      (f"{source.text}\n", ("source", "link", link))]
-            self.text.tag_bind(link, "<Button-1>", lambda _e, i=source.index: self._jump(i))
-            self.text.tag_bind(link, "<Enter>", lambda _e: self.text.configure(cursor="hand2"))
-            self.text.tag_bind(link, "<Leave>", lambda _e: self.text.configure(cursor="arrow"))
-        if not answer.sources:
-            note = ("The lines it quoted aren't in the transcript: check before relying on this answer"
-                    if answer.unsupported else "No transcript line given for this answer")
-            parts.append((f"{note}\n", "note"))
+                      (f"{source.text}\n", tags)]
+        if answer.warning:
+            parts.append((f"{answer.warning}\n", "note"))
         self._write(parts)
-        self._set_status("Click a line to see it in the captions" if answer.sources else EXAMPLES)
+        if saved and saved.startswith("Saved"):
+            hint = "Click a line to see it in the captions · " if answer.sources and self.meeting is None else ""
+            self._set_status(f"{hint}{saved}")
+        else:
+            self._set_status(saved or EXAMPLES, "err" if saved else "muted")
 
     def _jump(self, line_id: int) -> None:
         if not self.app.show_line(line_id):

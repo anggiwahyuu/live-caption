@@ -413,7 +413,7 @@ The window's size, position and the **Always on top** and **Auto summary** ticks
   ```
 
   The speaker label is only added when both **Me** and **Participant** were transcribed, and the translation (if any) becomes a second line. If the subtitles run consistently early or late, export again with the start time adjusted by that many seconds.
-- **Past meetings:** `⋯` → **Meeting history…** (or `Ctrl+H`) lists every transcript in the folder, newest first, with its length and whether it has a summary. Type in the search box to search **all meetings at once**: all words must occur in the meeting (in any order, translations count too), and the lines that contain them are shown with the words highlighted. With nothing typed, the selected meeting's summary is shown, or its first lines. **Summarize** makes the summary of a past meeting (also of transcripts from before the Summary button existed) and adds it to the top of its file; you can close the history window meanwhile. **Open file** (or a double click) opens the transcript in your text editor, **Open folder** the folder.
+- **Past meetings:** `⋯` → **Meeting history…** (or `Ctrl+H`) lists every transcript in the folder, newest first, with its length and whether it has a summary. Type in the search box to search **all meetings at once**: all words must occur in the meeting (in any order, translations count too), and the lines that contain them are shown with the words highlighted. With nothing typed, the selected meeting's summary is shown, or its first lines. **Ask…** asks questions about it ([Asking about the meeting](#asking-about-the-meeting)). **Summarize** makes the summary of a past meeting (also of transcripts from before the Summary button existed) and adds it to the top of its file; you can close the history window meanwhile. **Open file** (or a double click) opens the transcript in your text editor, **Open folder** the folder.
 - **To close:** click the window's close button, or press `Ctrl+C` in the terminal. Since the transcript is saved continuously, nothing is lost when you close it.
 
 ### Step 8 — Meeting summary
@@ -485,7 +485,11 @@ Joined late, or missed a part? `⋯` → **Ask about the meeting…** (or `Ctrl+
 
 The summary model (Ollama, or Claude with `--summarizer claude`) reads everything said so far and answers in a sentence or three. Under the answer are the transcript lines it comes from, with their time; **click one** to scroll the main window to it, where it lights up for a moment. The app checks that these lines really are in the transcript: when the model "quotes" something nobody said, the answer is marked *check before relying on this answer*. Something not discussed gets an answer saying so.
 
-Questions and answers stay in that window (they aren't saved in the transcript). With `qwen2.5:7b` an answer takes about 10–20 seconds on a short meeting; follow-up questions are quicker, since Ollama keeps the transcript it already read. With Claude, the whole transcript is sent to Anthropic with every question.
+Every question and its answer, with those lines, is saved at the end of the transcript file, under `## Questions`, so it's in the meeting history and its search too.
+
+**Past meetings:** in **Meeting history** (`Ctrl+H`), select a meeting and press **Ask…**. The window shows the questions asked about it before; new answers are added to its file.
+
+With `qwen2.5:7b` an answer takes about 10–20 seconds on a short meeting; follow-up questions are quicker, since Ollama keeps the transcript it already read. With Claude, the whole transcript is sent to Anthropic with every question.
 
 ### Step 9 — Choosing a model for your VRAM
 
@@ -691,7 +695,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `transcriber.py` | Loading faster-whisper (GPU with CPU fallback) and turning audio into text; `--vocab` |
 | `translation.py` | Google / Argos translation of final lines |
 | `summary.py` | Meeting summaries with Ollama or the Claude API |
-| `ask.py`, `ask_window.py` | Questions about the meeting: the answer and the transcript lines that back it up (checked against the transcript); the Ask window |
+| `ask.py`, `ask_window.py` | Questions about a meeting (live or past): the answer and the transcript lines that back it up (checked against the transcript), saved in its file; the Ask window |
 | `subtitles.py` | SRT / WebVTT export |
 | `export.py` | The summary as chat text, plain text and Word (`.docx`, built without extra packages) |
 | `history.py`, `history_window.py` | Reading past transcripts back, searching them, adding a summary to them; the Meeting history window |

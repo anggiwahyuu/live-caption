@@ -174,9 +174,14 @@ class Transcriber(threading.Thread):
         self._status(ready)
         if self.cuda_error and shutil.which("nvidia-smi"):  # an NVIDIA GPU is there, but CUDA failed
             launcher = "run.bat" if IS_WINDOWS else "./run.sh"
-            if device == "CPU":
+            if device == "CPU" and re.search(r"cudnn|cublas", self.cuda_error, re.I):
+                setup = "setup.ps1" if IS_WINDOWS else "./setup.sh"
+                self.ui_q.put(("error", f"NVIDIA GPU unavailable, running on CPU (slower): the CUDA libraries are "
+                                        f"missing or incomplete. Start the app with {launcher}, or run {setup} to "
+                                        f"repair them ({self.cuda_error})"))
+            elif device == "CPU":
                 self.ui_q.put(("error", f"NVIDIA GPU unavailable, running on CPU (slower). "
-                                        f"Start the app with {launcher}"))
+                                        f"Start the app with {launcher} ({self.cuda_error})"))
             else:
                 self.ui_q.put(("info", f"CUDA unavailable, so whisper.cpp runs on {device} instead"))
         lagging = False

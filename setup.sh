@@ -171,6 +171,22 @@ elif ! uv pip sync --python "$PY" --torch-backend cpu "${locks[@]}"; then
   uv pip install --python "$PY" --torch-backend cpu -r requirements.txt
   if [[ $NVIDIA == 1 ]]; then uv pip install --python "$PY" -r requirements-nvidia.txt; fi
 fi
+# torch's CUDA build (older setups) brought cuDNN for CUDA 13, which puts its files where ours are
+# (nvidia/cudnn/lib): removing it above can take ours along. Check the files, as run.sh finds them.
+cuda_libs_ok() {
+  "$PY" - <<'EOF' 2>/dev/null
+import os, sys
+import nvidia.cublas.lib, nvidia.cudnn.lib
+wanted = [(nvidia.cublas.lib, "libcublas.so.12"), (nvidia.cudnn.lib, "libcudnn.so.9")]
+sys.exit(not all(any(os.path.exists(os.path.join(p, f)) for p in m.__path__) for m, f in wanted))
+EOF
+}
+if [[ $NVIDIA == 1 ]] && ! cuda_libs_ok; then
+  note "Repairing the CUDA libraries…"
+  uv pip install --python "$PY" --reinstall-package nvidia-cublas-cu12 --reinstall-package nvidia-cudnn-cu12 \
+    --reinstall-package nvidia-cuda-nvrtc-cu12 -r requirements-nvidia.lock
+  cuda_libs_ok || warn "The CUDA libraries are still incomplete: the app will run on the CPU. Try ./setup.sh --recreate-venv."
+fi
 chmod +x run.sh
 
 # ---------------------------------------------------------------------------- 4. menu shortcut

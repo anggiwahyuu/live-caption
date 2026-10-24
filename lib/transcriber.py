@@ -138,7 +138,11 @@ class Transcriber(threading.Thread):
             path = whispercpp.ensure_model(name, progress)
             self._status(f"Loading model '{name}' with whisper.cpp…")
             server = whispercpp.WhisperCppServer(path, gpu, log=whispercpp.install_dir() / f"server-{next(role)}.log")
-            server.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), language="en")  # warm-up
+            try:
+                server.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), language="en")  # warm-up
+            except Exception:
+                server.close()  # don't leave it holding the GPU while another engine takes over
+                raise
             return server
 
         model, draft, _ = self._with_draft(load_one, "")

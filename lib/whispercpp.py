@@ -21,6 +21,7 @@ import socket
 import subprocess
 import time
 import types
+import urllib.error
 import urllib.request
 import uuid
 import wave
@@ -131,7 +132,14 @@ def download(url: str, dest: Path, progress=None) -> None:
     part = dest.with_name(dest.name + ".part")
     done = part.stat().st_size if part.exists() else 0
     req = urllib.request.Request(url, headers={"User-Agent": "live-caption", **({"Range": f"bytes={done}-"} if done else {})})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        if e.code != 416 or not done:
+            raise
+        part.unlink()  # nothing past what .part already has (it was complete, or longer than the file): start over
+        return download(url, dest, progress)
+    with resp:
         if done and resp.status != 206:  # the server ignored the range: start over
             done = 0
         total = done + int(resp.headers.get("Content-Length") or 0)
@@ -188,11 +196,18 @@ def install_binaries(progress=None) -> str:
         with tarfile.open(archive) as t:
             # "data": no absolute paths, no links out of the folder (Python 3.10.12+ / 3.11.4+)
             t.extractall(staging, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
-    models = target / "models"
-    if models.is_dir():  # keep downloaded models across updates
-        models.replace(staging / "models")
-    shutil.rmtree(target, ignore_errors=True)
+    old = target.with_name("whisper.cpp.old")
+    shutil.rmtree(old, ignore_errors=True)
+    if target.exists():
+        try:  # moved aside first: on Windows a running whisper-server keeps its folder in use, and then nothing changes
+            target.rename(old)
+        except OSError:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise OSError("whisper.cpp is in use: close Live Caption, then run setup again") from None
+        if (old / "models").is_dir():  # keep downloaded models across updates
+            (old / "models").replace(staging / "models")
     staging.replace(target)
+    shutil.rmtree(old, ignore_errors=True)
     archive.unlink()
     if not IS_WINDOWS:
         server_path().chmod(0o755)
@@ -243,12 +258,15 @@ def choose_device(setting: str, gpus: list[dict]) -> int | None:
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows: no console window for the server
 
 
-def _die_with_parent() -> None:
-    """Linux: the server stops when the app does, even if the app is killed (no orphan holding the GPU)."""
+def _die_with_parent():
+    """Linux: a function for Popen's preexec_fn so the server stops when the app does, even if the app is killed
+    (no orphan holding the GPU). libc is loaded here, in the app: the child only calls prctl, as loading a library
+    right after fork can hang when other threads were running."""
     try:
-        ctypes.CDLL("libc.so.6").prctl(1, 15)  # PR_SET_PDEATHSIG, SIGTERM
-    except OSError:
-        pass
+        prctl = ctypes.CDLL("libc.so.6").prctl
+    except (OSError, AttributeError):
+        return None
+    return lambda: prctl(1, 15)  # PR_SET_PDEATHSIG, SIGTERM
 
 
 def _free_port() -> int:
@@ -297,12 +315,21 @@ class WhisperCppServer:
         cmd = [str(server_path()), "-m", str(model), "--host", "127.0.0.1", "--port", str(self.port),
                "-t", str(threads), "-nlp"]
         cmd += ["-ng"] if gpu is None else ["-dev", str(gpu)]
+        self.cmd = cmd
         self.log_path = log or install_dir() / "server.log"
-        self.log = open(self.log_path, "w", encoding="utf-8", errors="replace")
-        self.proc = subprocess.Popen(cmd, stdout=self.log, stderr=subprocess.STDOUT, creationflags=_NO_WINDOW,
-                                     preexec_fn=_die_with_parent if IS_LINUX else None)
+        self.log = None
+        self.proc: subprocess.Popen | None = None
         self.conn: http.client.HTTPConnection | None = None
         atexit.register(self.close)  # the app quits normally: stop the server with it (Linux also covers kills)
+        self._start("w")
+
+    def _start(self, mode: str = "a") -> None:
+        """Starts the server and waits until the model is loaded. mode "a": a restart keeps the log before it."""
+        if self.log is not None:
+            self.log.close()
+        self.log = open(self.log_path, mode, encoding="utf-8", errors="replace")
+        self.proc = subprocess.Popen(self.cmd, stdout=self.log, stderr=subprocess.STDOUT, creationflags=_NO_WINDOW,
+                                     preexec_fn=_die_with_parent() if IS_LINUX else None)
         self._wait_ready()
 
     def _log_tail(self) -> str:
@@ -359,19 +386,24 @@ class WhisperCppServer:
                 return parse_result(json.loads(data))
             except (OSError, http.client.HTTPException):
                 self.conn = None
-                if attempt == 2 or self.proc.poll() is not None:
+                if self.proc.poll() is not None and attempt == 1:
+                    # It crashed (e.g. the GPU driver reset): start it again, so captions go on. If it dies
+                    # while loading, _start raises, and the next sentence tries again.
+                    self._start()
+                elif attempt == 2 or self.proc.poll() is not None:
                     raise RuntimeError(f"whisper-server is not responding: {self._log_tail()}") from None
-        raise AssertionError("unreachable")
+        raise RuntimeError(f"whisper-server is not responding: {self._log_tail()}")
 
     def close(self) -> None:
         if self.conn is not None:
             self.conn.close()
             self.conn = None
-        if self.proc.poll() is None:
+        if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
             try:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-        self.log.close()
+        if self.log is not None:
+            self.log.close()
 

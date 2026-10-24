@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import threading
 import uuid
 
 CLSID_MMDEVICE_ENUMERATOR = "BCDE0395-E52F-467C-8E3D-C4579291692E"
@@ -54,19 +55,17 @@ def _release(obj: ctypes.c_void_p) -> None:
         ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])(obj)  # IUnknown::Release
 
 
-_initialized = set()  # threads where COM is set up (it's per thread)
+_com = threading.local()  # COM is set up per thread
 
 
 def default_device_name(capture: bool) -> str | None:
     """The default input (capture=True) or output device's name; None when unknown or not on Windows."""
     if sys.platform != "win32":
         return None
-    import threading
-
     ole32 = ctypes.windll.ole32
-    if threading.get_ident() not in _initialized:
+    if not getattr(_com, "ready", False):
         ole32.CoInitializeEx(None, COINIT_MULTITHREADED)  # S_FALSE / RPC_E_CHANGED_MODE: COM is already usable
-        _initialized.add(threading.get_ident())
+        _com.ready = True
     enumerator, device, store = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
     value = PROPVARIANT()
     try:

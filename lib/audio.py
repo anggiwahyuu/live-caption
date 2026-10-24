@@ -6,10 +6,16 @@ import collections
 import datetime as dt
 import subprocess
 import threading
+import time
 
 import numpy as np
 
+from . import winaudio
 from .common import FRAME_BYTES, FRAME_MS, FRAME_SAMPLES, IS_MAC, IS_WINDOWS, SAMPLE_RATE
+
+
+class DeviceSwitched(Exception):
+    """The default device changed (Windows): record from the new one."""
 
 
 class AudioHub:
@@ -187,10 +193,12 @@ class AudioCapture(threading.Thread):
     Backends are tried in order: if one fails before delivering any audio (not installed,
     no sound server, no device), the next one is used. When recording breaks off later (a Bluetooth headset
     disconnects, a USB device is unplugged), it reconnects on its own, to the default device of that moment.
+    On Windows it also follows a change of the default device (Sound settings, or a headset that becomes the default).
     """
 
     RETRY_WAITS = (1.0, 2.0, 5.0)  # seconds between reconnect attempts; the last one repeats until it works
     STABLE_SECONDS = 2.0  # audio this long without a failure = reconnected (not a device that drops right away)
+    DEFAULT_CHECK_SECONDS = 2.0  # Windows: how often to look whether the default device changed
 
     def __init__(self, source: str, device: str | None, segmenter: Segmenter,
                  stop_event: threading.Event, report):
@@ -203,6 +211,7 @@ class AudioCapture(threading.Thread):
         self.proc: subprocess.Popen | None = None
         self._pending = np.zeros(0, dtype=np.float32)
         self.attempt = 0  # reconnect attempts since the recording broke off (0 = recording normally)
+        self.switch_to: str | None = None  # Windows: the new default device's name, to record from next
 
     def _backends(self):
         if IS_WINDOWS:
@@ -219,6 +228,10 @@ class AudioCapture(threading.Thread):
             if failure is None or self.stop_event.is_set():
                 break
             name, error, started = failure
+            if isinstance(error, DeviceSwitched):  # not a failure: start again right away, on the new device
+                self.segmenter.flush()
+                self._pending = np.zeros(0, dtype=np.float32)
+                continue
             recorded = recorded or started
             if not recorded:  # never worked (no recorder, no sound server, no device): retrying won't help
                 self.report(f"Recording '{label}' stopped ({name}): {error}")
@@ -324,33 +337,69 @@ class AudioCapture(threading.Thread):
     def _blocks_pyaudio(self):
         import pyaudiowpatch as pyaudio  # pyrefly: ignore[missing-import]  (installed on Windows only)
 
+        capture = self.source != "system"
+        follow = self.device is None  # --monitor names the device: nothing to follow
         pa = pyaudio.PyAudio()
         stream = None
         try:
-            if self.source == "system":
-                if self.device:
-                    info = next((d for d in pa.get_loopback_device_info_generator()
-                                 if self.device.lower() in d["name"].lower()), None)
-                    if info is None:
-                        raise RuntimeError(f"no loopback device matching '{self.device}'")
-                else:
-                    info = pa.get_default_wasapi_loopback()  # loopback of the default speakers/headset
-            else:
+            # The default device's name now: when it changes, the recording moves to the new one.
+            default = winaudio.default_device_name(capture) if follow else None
+            target, self.switch_to = self.switch_to, None
+            info = self._wasapi_device(pa, target, loopback=not capture) if target else None
+            if target and info is None:  # with two recordings, PortAudio's device list isn't read again
+                self.report(f"“{target}” is the default device now, but the app can't see it yet: "
+                            "restart the app to record from it", "info")
+            if info is None and capture:
                 info = pa.get_default_input_device_info()
+            elif info is None and self.device:
+                info = next((d for d in pa.get_loopback_device_info_generator()
+                             if self.device.lower() in d["name"].lower()), None)
+                if info is None:
+                    raise RuntimeError(f"no loopback device matching '{self.device}'")
+            elif info is None:
+                info = pa.get_default_wasapi_loopback()  # loopback of the default speakers/headset
             rate = int(info["defaultSampleRate"])
             channels = max(1, int(info["maxInputChannels"]))
             chunk = rate * FRAME_MS // 1000
             resample = Resampler(rate, channels)
             stream = pa.open(format=pyaudio.paFloat32, channels=channels, rate=rate, input=True,
                              input_device_index=info["index"], frames_per_buffer=chunk)
+            if target and info["name"] in (target, f"{target} [Loopback]"):
+                self.report(f"Recording '{self.segmenter.label}' now from {info['name']}", "info")
+            next_check = time.monotonic() + self.DEFAULT_CHECK_SECONDS
             while not self.stop_event.is_set():
-                # WASAPI loopback delivers nothing while nothing is playing, so this read may block.
+                if default and time.monotonic() >= next_check:
+                    next_check = time.monotonic() + self.DEFAULT_CHECK_SECONDS
+                    now = winaudio.default_device_name(capture)
+                    if now and now != default:
+                        self.switch_to = now
+                        raise DeviceSwitched(now)
+                # WASAPI loopback delivers nothing while nothing is playing: wait for data instead of blocking
+                # in read(), so the check above keeps running (after a switch, the old device goes quiet).
+                if stream.get_read_available() < chunk:
+                    time.sleep(0.01)
+                    continue
                 data = stream.read(chunk, exception_on_overflow=False)
                 yield resample(np.frombuffer(data, dtype=np.float32))
         finally:
             if stream is not None:
                 stream.close()
             pa.terminate()
+
+    @staticmethod
+    def _wasapi_device(pa, name: str, loopback: bool):
+        """PortAudio's WASAPI device (or its loopback) with this Windows device name, or None."""
+        if loopback:
+            return next((d for d in pa.get_loopback_device_info_generator() if d["name"] == f"{name} [Loopback]"),
+                        None)
+        import pyaudiowpatch as pyaudio  # pyrefly: ignore[missing-import]  (installed on Windows only)
+        wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)["index"]
+        for i in range(pa.get_device_count()):
+            d = pa.get_device_info_by_index(i)
+            if (d["hostApi"] == wasapi and d["maxInputChannels"] > 0 and d["name"] == name
+                    and not d.get("isLoopbackDevice")):
+                return d
+        return None
 
     # ---- macOS
     def _blocks_sounddevice(self):

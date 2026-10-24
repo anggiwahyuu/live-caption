@@ -652,6 +652,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 - **No text at all**: make sure the meeting audio goes through the default output. Test with `parec --device=@DEFAULT_MONITOR@ | head -c 100000 | wc -c` while playing any sound. If the output is on HDMI or Bluetooth, use `--monitor`.
 - **`Neither parec nor pw-record was found` (Linux)**: install the package that provides `parec` for your distribution (see [1.2 System packages](#12-system-packages)): `pulseaudio-utils` on Debian/Ubuntu, Fedora and openSUSE, `libpulse` on Arch.
 - **`Recording 'Participant' stopped (pw-record)` (Linux)**: both recorders failed. Check that PipeWire is running: `systemctl --user status pipewire`.
+- **`Recording 'Participant' now from Headphones (…) [Loopback]`** (Windows): you changed the default output, or Windows did when a headset was connected; the app moved along with it. `--monitor` fixes the device, so it doesn't move then.
 - **`Recording 'Me' lost at 10:42:05 … Reconnecting…`**: the device disconnected mid-meeting (Bluetooth headset, unplugged USB microphone, restarted sound server). The app keeps trying every few seconds and records again by itself, from the default device of that moment; `Recording 'Me' again from …` marks where the gap ends in the transcript. Nothing to do unless it never comes back: then check the device in the system's sound settings.
 - **Window doesn't stay on top (Wayland)**: KDE: right-click the title bar → *More Actions* → *Keep Above Others*. GNOME (Ubuntu, Fedora): right-click the title bar → *Always on Top*.
 - **Status "N sentences behind"**: the GPU can't keep up. Try `--draft-interval 0.5`, `--draft-model tiny`, or a smaller main model.
@@ -677,7 +678,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 
 ## Known limitations
 
-- **Switching the default output on Windows mid-meeting** likely keeps recording the old device, so restart the app after switching. (A device that disconnects or is unplugged is handled: see [Troubleshooting](#troubleshooting).)
+- **Windows, `--source both`: a device plugged in after the app started** isn't seen until the app restarts. The app follows a change of the default output or microphone (Sound settings, or a headset that becomes the default) within about 2 seconds, but while both recordings run, the device list PortAudio read at the start isn't read again. The app says so when that happens. With one source it is read again.
 - **Moving or renaming the project folder breaks `source .venv/bin/activate`**, because the virtualenv stores its absolute path. `./run.sh` and `run.bat` keep working since they call the venv's python directly. To fix `activate`, delete `.venv` and recreate it with the installation steps above.
 - **Windows and macOS support is untested** on real hardware (see sections 2 and 3).
 
@@ -691,6 +692,7 @@ After that, a plain `./run.sh` uses these settings, and the window shows which f
 | `config.py` | Command-line options, the `config.toml` settings file, the remembered window state |
 | `common.py` | Shared constants: audio format (16 kHz, 30 ms frames), OS checks, source labels |
 | `audio.py` | Recording (`parec` / `pw-record` / WASAPI / BlackHole) and reconnecting when a device drops, resampling, splitting speech into sentences, the queue to Whisper |
+| `winaudio.py` | Windows only: the current default output/microphone, asked from Windows itself (Core Audio through `ctypes`), so recording follows a change |
 | `transcriber.py` | Loading faster-whisper (GPU with CPU fallback) and turning audio into text; `--vocab` |
 | `translation.py` | Google / Argos translation of final lines |
 | `summary.py` | Meeting summaries with Ollama or the Claude API |

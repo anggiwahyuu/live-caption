@@ -25,6 +25,8 @@ env:
     model = WhisperModel("tiny", device="cpu", compute_type="int8")
     segments, info = model.transcribe(np.zeros(2 * 16000, dtype=np.float32))
     print("Whisper OK:", len(list(segments)), "segments,", info.duration, "s")
+    from lib import winaudio  # Windows' Core Audio through ctypes: runners have no sound device, so None, no crash
+    print("Default output / input:", winaudio.default_device_name(False), "/", winaudio.default_device_name(True))
 
 jobs:
   unix:

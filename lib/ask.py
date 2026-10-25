@@ -115,6 +115,9 @@ def ask(summarizer: Summarizer, transcript: str, question: str) -> Answer:
     system = ASK_SYSTEM.format(me=recorder(summarizer.me))
     raw = summarizer.complete(system, f"{transcript}\n\n{ASK_TASK.format(question=question)}", ASK_SCHEMA)
     text, quotes = parse_answer(raw)
+    if not re.search(r"\w", text):  # qwen2.5:3b often answers "..." or nothing at all
+        raise RuntimeError(f"the model gave no answer ({text or 'empty'!r}). Ask again, or use a larger "
+                           f"--summary-model")
     sources, unsupported = check_sources(quotes, transcript)
     return Answer(question, text, sources, unsupported)
 

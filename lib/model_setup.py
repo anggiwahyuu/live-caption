@@ -272,6 +272,35 @@ def _os_family() -> str:
     return f"{info.get('ID', '')} {info.get('ID_LIKE', '')}"
 
 
+GPU_VENDORS = {"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel"}
+# Arch's "ollama" package runs on the CPU only; a GPU needs one of these next to it. ollama-vulkan (40 MB) works on
+# NVIDIA, AMD and Intel cards; ollama-cuda is ~5 GB with CUDA and built for CUDA 13, which no longer runs GTX 10xx.
+ARCH_OLLAMA_GPU = ("ollama-vulkan", "ollama-cuda", "ollama-rocm")
+
+
+def gpu_vendors() -> set[str]:
+    """Linux: who made the graphics cards here ("nvidia", "amd", "intel"), from /sys."""
+    found = set()
+    for vendor in Path("/sys/class/drm").glob("card[0-9]*/device/vendor"):
+        try:
+            found.add(GPU_VENDORS.get(vendor.read_text().strip(), "other"))
+        except OSError:
+            pass
+    return found
+
+
+def arch_ollama_gpu_missing() -> bool:
+    """Arch: a separate GPU (NVIDIA, AMD) that Ollama can't use, because only the CPU package is installed.
+    Built-in Intel graphics are left out: often slower than the CPU."""
+    if "arch" not in _os_family().split() or not gpu_vendors() & {"nvidia", "amd"}:
+        return False
+    try:
+        return not any(subprocess.run(["pacman", "-Q", package], capture_output=True).returncode == 0
+                       for package in ARCH_OLLAMA_GPU)
+    except OSError:  # no pacman after all
+        return False
+
+
 def ollama_install_command() -> list[str] | None:
     """The command that installs Ollama here (its last item is what the user sees), or None: the installer from ollama.com."""
     if IS_WINDOWS:
@@ -282,7 +311,8 @@ def ollama_install_command() -> list[str] | None:
     if IS_MAC:
         return ["sh", "-c", "brew install ollama && brew services start ollama"] if shutil.which("brew") else None
     if "arch" in _os_family().split():
-        return ["sh", "-c", "sudo pacman -S --needed ollama && sudo systemctl enable --now ollama"]
+        packages = "ollama ollama-vulkan" if gpu_vendors() & {"nvidia", "amd"} else "ollama"
+        return ["sh", "-c", f"sudo pacman -S --needed {packages} && sudo systemctl enable --now ollama"]
     return ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"]
 
 
@@ -353,6 +383,17 @@ def start_ollama(url: str, report: Report):
     return server
 
 
+def offer_ollama_gpu(url: str, report: Report) -> None:
+    """Arch with the CPU-only Ollama (installed by an older setup, or by hand): summaries take minutes longer."""
+    command = "sudo pacman -S --needed ollama-vulkan && sudo systemctl restart ollama"
+    say("   Ollama is installed without GPU support, so summaries run on the CPU (a long meeting: ~10 minutes).")
+    if sys.stdin.isatty() and ask(f"   Add GPU support ({command})?", True):
+        if subprocess.run(["sh", "-c", command]).returncode == 0 and ollama_up(url, wait=20):
+            return
+    report.add(WARN, "Ollama GPU", "summaries run on the CPU: Ollama is installed without GPU support",
+               [f"Add it: {command}"])
+
+
 def ollama_models_dir() -> Path:
     if os.environ.get("OLLAMA_MODELS"):
         return Path(os.environ["OLLAMA_MODELS"])
@@ -389,6 +430,8 @@ def setup_ollama(args, report: Report) -> None:
         server = None if ollama_up(url) else start_ollama(url, report)
     except LookupError:
         return
+    if urlparse(url).hostname in ("localhost", "127.0.0.1", "::1") and arch_ollama_gpu_missing():
+        offer_ollama_gpu(url, report)
     try:
         candidates = [wanted]
         ram = total_ram_gb()

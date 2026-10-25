@@ -93,12 +93,10 @@ def check_sources(quotes: list[str], transcript: str) -> tuple[list[Source], int
     """Finds each quote in the transcript -> (the lines, in transcript order; how many quotes weren't there)."""
     lines = LINE.findall(transcript)
     pairs = [(speaker, text) for _, speaker, text in lines]
-    # Models often copy the whole line, "[10:00:25] Participant: …", with a time that may be off: only the text counts.
-    prefix = re.compile(r"^\s*(\[[\d:]+\]\s*)?(?:(?:{}):\s*)?".format("|".join(map(re.escape, {s for s, _ in pairs}))))
     found: dict[int, Source] = {}
     unsupported = 0
     for quote in quotes:
-        i = locate_quote(prefix.sub("", quote, count=1), pairs)
+        i = locate_quote(quote, pairs)  # a copied "[10:00:25] Participant:" in front is left out
         if i is None:
             unsupported += 1
         elif i not in found:

@@ -140,10 +140,17 @@ def parse_transcript(transcript: str) -> list[tuple[str, str]]:
     return [(m[1], m[2]) for m in re.finditer(r"^\[[\d:]+\] ([^:\n]+): (.*)$", transcript, re.M)]
 
 
+def strip_line_prefix(text: str, lines: list[tuple[str, str]]) -> str:
+    """Models often copy the whole line, "[10:00:25] Participant: …", with a time that may be off: only the text
+    counts."""
+    speakers = "|".join(map(re.escape, {speaker for speaker, _ in lines}))
+    return re.sub(rf"^\s*(\[[\d:]+\]\s*)?(?:(?:{speakers}):\s*)?", "", text, count=1) if speakers else text
+
+
 def locate_quote(quote: str, lines: list[tuple[str, str]]) -> int | None:
     """Index of the transcript line the quote comes from, or None if it isn't really in the transcript.
     A quote may run over up to 3 consecutive lines (Whisper splits sentences at short pauses)."""
-    q = _words(quote)
+    q = _words(strip_line_prefix(quote, lines))
     if len(q) < 2:
         return None
     for span in (1, 2, 3):  # prefer the shortest stretch that contains the quote
@@ -206,13 +213,16 @@ def verify_items(data: dict, transcript: str, me: str = "Me") -> tuple[dict, int
             if kind == "action_items":
                 who, task = str(item.get("who", "")).strip(), _drop_invented_dates(str(item.get("task", "")), all_words)
                 named = str(item.get("named", "")).strip()
-                deadline = str(item.get("deadline", "")).strip()
+                deadline = strip_line_prefix(str(item.get("deadline", "")), lines).strip()
                 if named and _supported(named, nearby):
                     who = named  # a name said right there beats the generic label
                 elif who not in ("Me", me, "Participant") and not (who and _supported(who, nearby)):
                     who = lines[i][0]  # a name the transcript doesn't give here: use who said the quoted line
                 if deadline and not _deadline_supported(deadline, nearby):
                     deadline = ""
+                line_words = set(_words(lines[i][1]))
+                if deadline and sum(w in line_words for w in _words(deadline)) >= 0.8 * len(line_words):
+                    deadline = ""  # the whole quoted line copied again, not a deadline
                 key = (kind, " ".join(_words(task)))
                 clean = {"who": who, "task": task, "deadline": deadline}
             else:

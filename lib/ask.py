@@ -11,7 +11,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 
-from .summary import Summarizer, locate_quote, recorder
+from .summary import QUOTE, Summarizer, locate_quote, recorder
 
 MAX_SOURCES = 3
 
@@ -21,18 +21,22 @@ else (several people, not told apart). The transcript may contain recognition er
 Never invent facts, names, numbers or dates.
 People in the meeting often use other words than the question: a "requirement" may be something someone asked
 for, a "deadline" may be "by Thursday". Look for lines that answer the question in meaning, not only in wording.
-Only when no line does, say in one sentence that it wasn't discussed or wasn't clear."""
+Only when no line does, say in one sentence that it wasn't discussed or wasn't clear.
+Answer in your own words. When the answer is a person, name them: by the name used in the meeting, else by their
+speaker label; "I" in a line is that line's speaker."""
 
 ASK_TASK = """Question: {question}
 
 Answer in the language of the question, in 1-3 sentences, using only the transcript above.
-"quotes": up to 3 transcript lines that show the answer, each copied word for word (the text after "Speaker:"),
+"quotes": up to 3 transcript lines that show the answer, each copied word for word (the text after "Speaker:",
+without quotation marks around it),
 or none if the transcript doesn't answer the question.
 Answer with JSON only: {{"answer": "...", "quotes": ["...", "..."]}}"""
 
 ASK_SCHEMA = {
     "type": "object",
-    "properties": {"answer": {"type": "string"}, "quotes": {"type": "array", "items": {"type": "string"}}},
+    "properties": {"answer": {"type": "string", "maxLength": 600},  # capped like summary.EXTRACT_SCHEMA
+                   "quotes": {"type": "array", "maxItems": MAX_SOURCES, "items": QUOTE}},
     "required": ["answer", "quotes"],
 }
 

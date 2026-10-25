@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import difflib
 import json
 import queue
@@ -57,6 +58,14 @@ HEADINGS = {
 }
 
 
+OLLAMA_TIMEOUT = 900  # seconds Ollama may stay silent: reading a long meeting on a CPU
+PLAIN_QUOTES = "Write each quote once, as plain text: no quotation marks, no backslashes."
+
+
+class RepeatLimit(RuntimeError):
+    """Ollama stopped the answer because the model kept repeating itself."""
+
+
 def recorder(me: str) -> str:
     """How the prompts name the person who recorded the meeting: their label, which is "Me" unless --my-name
     gives their name (older transcripts still say "Me")."""
@@ -86,29 +95,37 @@ EXTRACT_TASK = """Go through the transcript above and list:
 - open_questions: questions or issues raised but not settled.
 
 Rules for every item:
-- "quote": copied word for word from the transcript line that shows the item (the text after "Speaker:").
+- "quote": copied word for word from the transcript line that shows the item (the text after "Speaker:", without
+  quotation marks around it).
 - "who": who will do the task: "{me_name}" or "Participant".
 - "named": the name of the person who will do the task if the quote or the lines around it say it
-  (e.g. "Sari, please …" -> "Sari"), otherwise "".
+  (e.g. "Sari, please …" -> "Sari"; "Dimas, can you …?" answered with "Yes, I'll …" -> "Dimas"), otherwise "".
+- "text": the decision or question in a short sentence that is clear on its own, not a copy of the quote.
 - "task": what to do, without the deadline.
 - "deadline": copied word for word from the transcript, in its own language, or "" if no deadline was said.
 - "text" and "task" are written in {language}, like the transcript. Do not translate anything into English.
 Leave a list empty if there is nothing for it. Answer with JSON only."""
 
+# Lengths and counts are capped: on a long meeting full of "Oke oke." qwen2.5 can repeat it inside a quote until the
+# context is full, hours on a CPU (Ollama's repeat check doesn't catch a loop that slow). Ollama enforces the caps.
+QUOTE = {"type": "string", "maxLength": 400}  # up to 3 transcript lines
+TEXT = {"type": "string", "maxLength": 300}
+NAME = {"type": "string", "maxLength": 60}
+MAX_ITEMS = 15  # per list
+
+
+def _items(properties: dict) -> dict:
+    return {"type": "array", "maxItems": MAX_ITEMS,
+            "items": {"type": "object", "properties": properties, "required": list(properties)}}
+
+
 EXTRACT_SCHEMA = {
     "type": "object",
     "properties": {
-        "decisions": {"type": "array", "items": {
-            "type": "object", "properties": {"text": {"type": "string"}, "quote": {"type": "string"}},
-            "required": ["text", "quote"]}},
-        "action_items": {"type": "array", "items": {
-            "type": "object",
-            "properties": {"who": {"type": "string"}, "named": {"type": "string"}, "task": {"type": "string"},
-                           "deadline": {"type": "string"}, "quote": {"type": "string"}},
-            "required": ["who", "named", "task", "deadline", "quote"]}},
-        "open_questions": {"type": "array", "items": {
-            "type": "object", "properties": {"text": {"type": "string"}, "quote": {"type": "string"}},
-            "required": ["text", "quote"]}},
+        "decisions": _items({"text": TEXT, "quote": QUOTE}),
+        "action_items": _items({"who": NAME, "named": NAME, "task": TEXT,
+                                "deadline": {"type": "string", "maxLength": 80}, "quote": QUOTE}),
+        "open_questions": _items({"text": TEXT, "quote": QUOTE}),
     },
     "required": ["decisions", "action_items", "open_questions"],
 }
@@ -130,6 +147,14 @@ def _words(text: str) -> list[str]:
 ENGLISH_HINTS = {"the", "and", "is", "are", "was", "will", "to", "of", "with", "that", "be", "by", "but"}
 
 
+def _english_sentence(sentence: str) -> bool:
+    """Stricter than _looks_english, for one sentence: a sentence in another language may hold an English phrase
+    ("Rapat membahas the new onboarding flow")."""
+    words = _words(sentence)
+    hints = sum(w in ENGLISH_HINTS for w in words)
+    return hints >= 2 and hints / len(words) >= 0.15
+
+
 def _looks_english(text: str) -> bool:
     words = _words(text)
     return bool(words) and sum(w in ENGLISH_HINTS for w in words) / len(words) > 0.06
@@ -138,6 +163,39 @@ def _looks_english(text: str) -> bool:
 def parse_transcript(transcript: str) -> list[tuple[str, str]]:
     """'[10:00:05] Me: text' lines -> [(speaker, text), ...]."""
     return [(m[1], m[2]) for m in re.finditer(r"^\[[\d:]+\] ([^:\n]+): (.*)$", transcript, re.M)]
+
+
+# A line that starts by asking someone by name: "Budi tolong …", "Sari, please …", "Dimas, can you …"
+ADDRESSED = re.compile(r"^([A-Z][\w'-]+),?\s+(?i:tolong|mohon|bisa|kamu|nanti|please|can you|could you|would you)\b")
+# "Siap, mulai minggu depan saya bikin." / "Yeah, I'll fix them": taking on what the line before asked
+# (not "I'll …" or "Saya …" alone: that can be someone else taking on something else)
+ACCEPTS = re.compile(r"^(?i:siap|oke|ok|okay|baik|iya|ya|bisa|yeah|yes|sure|will do)\b")
+NOT_NAMES = {"oke", "ok", "okay", "kita", "kami", "saya", "aku", "kamu", "ya", "jadi", "nah", "terus", "nanti", "itu",
+             "ini", "yang", "dan", "so", "yeah", "yes", "we", "you", "i", "and", "then", "now", "please", "can", "also",
+             "juga", "mungkin", "maybe", "tolong", "mohon", "bisa"}
+
+
+# qwen2.5 lists proposals, doubts and requests as decisions, though told not to. The line it quotes shows it.
+TENTATIVE = re.compile(r"\?|\b(?:maybe|might|could|perhaps|not sure|i think|mungkin|belum|apakah|gimana|bagaimana|"
+                       r"kalau|usul\w*)\b", re.IGNORECASE)
+AGREED = re.compile(r"\b(?:agreed|agree|decided|deal|setuju|sepakat|disepakati|diputuskan)\b", re.IGNORECASE)
+NOT_AGREED = re.compile(r"\b(?:no decision|not decided|disagree|don't agree|belum ada keputusan|belum diputuskan|"
+                        r"kurang setuju|tidak setuju|gak setuju|nggak setuju)\b", re.IGNORECASE)
+
+
+def _addressed(text: str) -> str | None:
+    """The name a line asks something of: "Budi tolong …" -> "Budi"."""
+    m = ADDRESSED.match(text)
+    return m[1] if m and m[1].casefold() not in NOT_NAMES else None
+
+
+def _agreed(text: str) -> bool:
+    return bool(AGREED.search(text)) and not NOT_AGREED.search(text)
+
+
+def _settled(lines: list[tuple[str, str]], i: int) -> bool:
+    """Whether line i says something settled: not a proposal or a doubt, or agreed on in it or the 3 lines after."""
+    return not TENTATIVE.search(lines[i][1]) or any(_agreed(text) for _, text in lines[i:i + 4])
 
 
 def strip_line_prefix(text: str, lines: list[tuple[str, str]]) -> str:
@@ -157,7 +215,10 @@ def locate_quote(quote: str, lines: list[tuple[str, str]]) -> int | None:
         best, best_score = None, 0.0
         for i in range(len(lines) - span + 1):
             t = _words(" ".join(text for _, text in lines[i:i + span]))
-            found = sum(w in t for w in q) / len(q)  # share of the quote's words in this stretch
+            # share of the quote's words in this stretch, each at most as often as it is there: a model looping on
+            # "Oke oke. Oke oke. …" doesn't match the one "Oke oke." it started from
+            have = collections.Counter(t)
+            found = sum(min(n, have[w]) for w, n in collections.Counter(q).items()) / len(q)
             score = found + difflib.SequenceMatcher(None, " ".join(q), " ".join(t)).ratio() / 10  # tie-break
             if found >= 0.8 and score > best_score:
                 best, best_score = i, score
@@ -201,7 +262,8 @@ def verify_items(data: dict, transcript: str, me: str = "Me") -> tuple[dict, int
     out = {"decisions": [], "action_items": [], "open_questions": []}
     dropped = 0
     seen = set()
-    for kind in out:
+    taken = set()  # (list, line): a decision moved to another list doesn't repeat an item from the same line
+    for kind in ("action_items", "open_questions", "decisions"):  # decisions last: some move to the other lists
         for item in data.get(kind) or []:
             if not isinstance(item, dict):
                 continue
@@ -210,6 +272,10 @@ def verify_items(data: dict, transcript: str, me: str = "Me") -> tuple[dict, int
                 dropped += 1
                 continue
             nearby = set(_words(" ".join(t for _, t in lines[max(0, i - NEARBY_LINES):i + NEARBY_LINES + 1])))
+            addressed = _addressed(lines[i][1])
+            if not addressed and i > 0 and lines[i][0] != me and ACCEPTS.match(lines[i][1]):
+                addressed = _addressed(lines[i - 1][1])  # the answer to "Sari nanti tolong …"
+            target = kind
             if kind == "action_items":
                 who, task = str(item.get("who", "")).strip(), _drop_invented_dates(str(item.get("task", "")), all_words)
                 named = str(item.get("named", "")).strip()
@@ -217,7 +283,10 @@ def verify_items(data: dict, transcript: str, me: str = "Me") -> tuple[dict, int
                 if named and _supported(named, nearby):
                     who = named  # a name said right there beats the generic label
                 elif who not in ("Me", me, "Participant") and not (who and _supported(who, nearby)):
-                    who = lines[i][0]  # a name the transcript doesn't give here: use who said the quoted line
+                    # a name the transcript doesn't give here: who was asked, else who spoke
+                    who = addressed or lines[i][0]
+                elif who == "Participant" and addressed:
+                    who = addressed  # "Budi tolong urus upgrade-nya": the model left the name out
                 if deadline and not _deadline_supported(deadline, nearby):
                     deadline = ""
                 line_words = set(_words(lines[i][1]))
@@ -227,12 +296,17 @@ def verify_items(data: dict, transcript: str, me: str = "Me") -> tuple[dict, int
                 clean = {"who": who, "task": task, "deadline": deadline}
             else:
                 text = _drop_invented_dates(str(item.get("text", "")), all_words)
-                key = (kind, " ".join(_words(text)))
                 clean = {"text": text}
-            if not key[1] or key in seen:
+                if kind == "decisions" and addressed:  # "Rina, kamu yang susun draftnya ya": a task for Rina
+                    target, clean = "action_items", {"who": addressed, "task": text, "deadline": ""}
+                elif kind == "decisions" and not _settled(lines, i):
+                    target = "open_questions"  # "We could also do a beta, maybe." and nobody agreed
+                key = (target, " ".join(_words(text)))
+            if not key[1] or key in seen or (target != kind and (target, i) in taken):
                 continue
             seen.add(key)
-            out[kind].append(clean)
+            taken.add((target, i))
+            out[target].append(clean)
     return out, dropped
 
 
@@ -329,11 +403,23 @@ class Summarizer:
         overview = re.sub(r"^#+.*\n?", "", overview).strip()  # in case it added a heading anyway
         all_words = set(_words(transcript))
         sentences = re.split(r"(?<=[.!?])\s+", overview)
-        overview = " ".join(x for x in sentences if _drop_invented_dates(x, all_words) == x.strip()) or overview
+        kept = [x for x in sentences if _drop_invented_dates(x, all_words) == x.strip()
+                and (language == "English" or not _english_sentence(x))]  # "Decided to shift …" amid Indonesian
+        overview = " ".join(kept) or overview
         return render_summary(overview, items, headings)
 
     def _ollama(self, system: str, user: str, num_ctx: int, temperature: float = 0.2, fmt=None) -> str:
-        body = {"model": self.model, "stream": False,
+        try:
+            return self._ollama_once(system, user, num_ctx, temperature, fmt)
+        except RepeatLimit:
+            # In JSON, qwen2.5 sometimes puts a quote in escaped quotation marks and then loops on the closing ones
+            # until Ollama gives up; the same request does it every time, a plain-text reminder doesn't.
+            return self._ollama_once(system, f"{user}\n{PLAIN_QUOTES}", num_ctx, temperature, fmt)
+
+    def _ollama_once(self, system: str, user: str, num_ctx: int, temperature: float, fmt) -> str:
+        # Streamed: the time limit then only counts while Ollama sends nothing. On a CPU, reading a long meeting
+        # takes minutes before the first word; writing the answer may take many more, word by word.
+        body = {"model": self.model, "stream": True,
                 "options": {"num_ctx": num_ctx, "temperature": temperature},  # low: stick to the transcript
                 "messages": [{"role": "system", "content": system},
                              {"role": "user", "content": user}]}
@@ -341,18 +427,34 @@ class Summarizer:
             body["format"] = fmt  # JSON schema: Ollama constrains the answer to it
         req = urllib.request.Request(f"{self.ollama_url}/api/chat", data=json.dumps(body).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
+        parts = []
         try:
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.load(resp)
+            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+                for line in resp:
+                    if not line.strip():
+                        continue
+                    chunk = json.loads(line)
+                    if "error" in chunk:  # it went wrong after the answer had started
+                        self._fail(500, chunk["error"], fmt)
+                    parts.append(chunk.get("message", {}).get("content", ""))
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")
-            if e.code == 404:
-                raise RuntimeError(f"Ollama model '{self.model}' not found. Download it with: ollama pull {self.model}")
-            raise RuntimeError(f"Ollama error {e.code}: {detail}")
+            self._fail(e.code, e.read().decode("utf-8", "replace"), fmt)
         except (urllib.error.URLError, OSError) as e:
+            if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
+                # Ollama is there, just slow: without a GPU a long meeting can take many minutes
+                raise RuntimeError(f"Ollama ({self.model}) sent nothing for {OLLAMA_TIMEOUT // 60} minutes. "
+                                   f"Long meetings are slow without a GPU that fits the model: try a smaller "
+                                   f"--summary-model, or --summarizer claude")
             raise RuntimeError(f"Can't reach Ollama at {self.ollama_url} ({e}). "
                                f"Install it from ollama.com and make sure it is running.")
-        return data["message"]["content"].strip()
+        return "".join(parts).strip()
+
+    def _fail(self, code: int, detail: str, fmt) -> None:
+        if code == 404:
+            raise RuntimeError(f"Ollama model '{self.model}' not found. Download it with: ollama pull {self.model}")
+        if "repeat limit" in detail and fmt is not None:
+            raise RepeatLimit(f"Ollama error {code}: {detail}")
+        raise RuntimeError(f"Ollama error {code}: {detail}")
 
     def _claude(self, system: str, user: str) -> str:
         try:

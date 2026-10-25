@@ -54,7 +54,7 @@ The tests use only the Python standard library (`unittest`), so nothing extra ne
 .venv\Scripts\python -m unittest discover -s tests -v   # Windows
 ```
 
-They are lightweight and finish in a few seconds: no Whisper model, no audio recording, no window and no internet. Where something outside is involved, a stand-in plays its part: a fake local Ollama server for summaries and questions (the Claude API is not called), a small Python script for `whisper-server`, a fake PyAudioWPatch for Windows recording, a local web server for the whisper.cpp release.
+They are lightweight and finish in a few seconds: no Whisper model, no audio recording, no window and no internet. Where something outside is involved, a stand-in plays its part: a fake local Ollama server for summaries and questions (the Claude API is not called), a small Python script for `whisper-server`, a fake PyAudioWPatch for Windows recording, a local web server for the whisper.cpp release. Real answers of the summary model (`qwen2.5:7b`), recorded once in `tests/model_outputs.json`, are replayed to check what the app does with the mistakes such a model really makes: quotes with the line's time and speaker in front, proposals listed as decisions, a quote that loops.
 
 ## Library versions
 

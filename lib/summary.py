@@ -9,6 +9,7 @@ import queue
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -325,6 +326,23 @@ def render_summary(overview: str, items: dict, headings: tuple[str, str, str, st
            f"### {headings[2]}", *bullets(actions), "",
            f"### {headings[3]}", *bullets([q["text"] for q in items["open_questions"]])]
     return "\n".join(out)
+
+
+def free_ollama_gpu(url: str) -> list[str]:
+    """Asks a local Ollama to unload the models it keeps in memory (5 minutes after each answer), so Whisper fits
+    on a small GPU. -> the models unloaded. Ollama loads them again for the next summary."""
+    if urllib.parse.urlparse(url).hostname not in ("localhost", "127.0.0.1", "::1"):
+        return []
+    url = url.rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{url}/api/ps", timeout=3) as resp:
+            loaded = [m["name"] for m in json.load(resp).get("models", []) if m.get("size_vram")]
+        for name in loaded:
+            body = json.dumps({"model": name, "keep_alive": 0}).encode()
+            urllib.request.urlopen(urllib.request.Request(f"{url}/api/generate", data=body), timeout=30).read()
+    except (OSError, ValueError, KeyError):
+        return []
+    return loaded
 
 
 class Summarizer:

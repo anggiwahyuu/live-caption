@@ -15,6 +15,7 @@ import numpy as np
 from . import whispercpp
 from .audio import AudioHub
 from .common import IS_MAC, IS_WINDOWS, SAMPLE_RATE
+from .summary import free_ollama_gpu
 
 
 def normalize(text: str) -> str:
@@ -85,12 +86,20 @@ class Transcriber(threading.Thread):
         """-> (model, draft model, where it runs). Tries the engines in order; see _attempts."""
         errors = []
         self.cuda_error: str | None = None  # why the NVIDIA GPU couldn't be used, when it was tried
-        for engine, device in self._attempts():
+        attempts = self._attempts()
+        while attempts:
+            engine, device = attempts.pop(0)
             try:
                 if engine == "whisper.cpp":
                     return self._load_whispercpp()
                 return self._load_faster_whisper(device)
             except Exception as e:
+                if device == "cuda" and "out of memory" in str(e).lower() and not self.cuda_error:
+                    # Ollama keeps the summary model in VRAM for 5 minutes: on a 4 GB GPU, Whisper then won't fit
+                    if freed := free_ollama_gpu(self.args.ollama_url):
+                        self.ui_q.put(("info", f"GPU memory was full: unloaded Ollama's {', '.join(freed)} "
+                                               f"(it loads again for the next summary)"))
+                        attempts.insert(0, (engine, device))
                 errors.append(f"{engine} {device or ''}: {e}".replace("  ", " "))
                 if device == "cuda":
                     self.cuda_error = str(e)
@@ -179,6 +188,9 @@ class Transcriber(threading.Thread):
                 self.ui_q.put(("error", f"NVIDIA GPU unavailable, running on CPU (slower): the CUDA libraries are "
                                         f"missing or incomplete. Start the app with {launcher}, or run {setup} to "
                                         f"repair them ({self.cuda_error})"))
+            elif device == "CPU" and "out of memory" in self.cuda_error.lower():
+                self.ui_q.put(("error", f"The GPU's memory is full (another program uses it), so Whisper runs on "
+                                        f"the CPU (slower). Close it, or use a smaller --model ({self.cuda_error})"))
             elif device == "CPU":
                 self.ui_q.put(("error", f"NVIDIA GPU unavailable, running on CPU (slower). "
                                         f"Start the app with {launcher} ({self.cuda_error})"))

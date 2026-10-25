@@ -83,8 +83,10 @@ def setup(root, font_size: int) -> Theme:
 
 
 def ask_save_path(parent, initialdir, name: str, filetypes: list[tuple[str, str]]):
-    """A Save dialog -> Path, or None if cancelled. name has no extension: the file gets the one of the type
-    chosen in the dialog (unless one of the types' is typed). filetypes: [(label, "*.ext")], the first preselected."""
+    """A Save dialog -> (Path, label of the file type), or None if cancelled. name has no extension: the file gets
+    the one of the type chosen in the dialog (unless one of the types' is typed). Types may share an extension
+    ("Word: summary only", "Word: summary and transcript"), so the label says which one was chosen.
+    filetypes: [(label, "*.ext")], the first preselected."""
     import tkinter as tk
     from pathlib import Path
     from tkinter import filedialog
@@ -96,7 +98,19 @@ def ask_save_path(parent, initialdir, name: str, filetypes: list[tuple[str, str]
                                         typevariable=chosen, defaultextension=default)
     if not path:
         return None
-    path = Path(path)
-    if path.suffix.lower() not in {pattern[1:] for _, pattern in filetypes}:
-        path = path.with_name(path.name + dict(filetypes).get(chosen.get(), filetypes[0][1])[1:])
-    return path
+    return chosen_type(Path(path), chosen.get(), filetypes)
+
+
+def chosen_type(path, chosen: str, filetypes: list[tuple[str, str]]):
+    """-> (path, label): the chosen type when the file has its extension; else the first type with the file's
+    extension (typed by hand), or the chosen type's extension added."""
+    patterns = dict(filetypes)
+    if chosen not in patterns:
+        chosen = filetypes[0][0]
+    suffix = path.suffix.lower()
+    if patterns[chosen][1:] == suffix:
+        return path, chosen
+    for label, pattern in filetypes:
+        if pattern[1:] == suffix:
+            return path, label
+    return path.with_name(path.name + patterns[chosen][1:]), chosen

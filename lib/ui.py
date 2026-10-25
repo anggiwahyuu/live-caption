@@ -116,6 +116,7 @@ class App:
         self.menu.add_command(label="Search…", command=self._open_search, accelerator=f"{mod_label}+F")
         self.menu.add_command(label="Meeting history…", command=self._open_history, accelerator=f"{mod_label}+H")
         self.menu.add_command(label="Save as…", command=self._save_as, accelerator=f"{mod_label}+S")
+        self.menu.add_command(label="Copy transcript for chat", command=self._copy_transcript)
         self.menu.add_command(label="Clear screen", command=self._clear, accelerator=f"{mod_label}+L")
 
         tk.Frame(root, bg=c["line"], height=1).pack(fill="x")
@@ -426,12 +427,15 @@ class App:
     def _save_as(self) -> None:
         from tkinter import simpledialog
         started = self.transcript.started
-        path = theme.ask_save_path(
+        summary = self.transcript.summary
+        chosen = theme.ask_save_path(
             self.root, self.transcript.path.parent, self.transcript.path.stem,
-            [("Markdown: transcript, summary and questions", "*.md"), ("Word: transcript only", "*.docx"),
-             ("Text: transcript only", "*.txt"), ("Subtitles (SubRip)", "*.srt"), ("Subtitles (WebVTT)", "*.vtt")])
-        if path is None:
+            [("Markdown: transcript, summary and questions", "*.md")] + ([export.WORD_WITH_TRANSCRIPT] if summary else [])
+            + [("Word: transcript only", "*.docx"), ("Text: transcript only", "*.txt"),
+               ("Subtitles (SubRip)", "*.srt"), ("Subtitles (WebVTT)", "*.vtt")])
+        if chosen is None:
             return
+        path, kind = chosen
         ext = path.suffix.lower()
         note = ""
         if ext in (".srt", ".vtt"):
@@ -448,6 +452,10 @@ class App:
                 return
             content, count = self.transcript.subtitles(origin, ext[1:])
             note = f" ({count} subtitles)"
+        elif kind == export.WORD_WITH_TRANSCRIPT[0]:
+            language = self.summary_language
+            content = export.to_docx(summary[1], export.title(started, language), self.transcript.export_lines(),
+                                     export.transcript_section(language))
         elif ext in (".docx", ".txt"):
             heading = export.title(started, self.transcript.main_language(), transcript=True)
             to = export.transcript_to_docx if ext == ".docx" else export.transcript_to_text
@@ -463,6 +471,16 @@ class App:
             self._set_status(f"Failed to save: {e}", "err", always=True)
             return
         self._set_status(f"Saved: {path}{note}", "muted", always=True)
+
+    def _copy_transcript(self) -> None:
+        if not self.transcript.records:
+            self._set_status("Nothing to copy yet", "muted", always=True)
+            return
+        heading = export.title(self.transcript.started, self.transcript.main_language(), transcript=True)
+        chat = export.transcript_to_chat(self.transcript.export_lines(), heading)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(chat)
+        self._set_status(*export.copied_message(chat), always=True)
 
     def _open_ask(self) -> None:
         self.open_ask(None)

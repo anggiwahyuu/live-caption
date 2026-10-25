@@ -65,6 +65,7 @@ class HistoryWindow:
         self.menu = tk.Menu(win, tearoff=0, bg=c["field"], fg=c["fg"], activebackground=c["hover"],
                             activeforeground=c["fg"], bd=0, relief="flat", font=theme.ui)
         self.menu.add_command(label="Save as…", command=self._save_as)
+        self.menu.add_command(label="Copy transcript for chat", command=self._copy_transcript)
         self.menu.add_command(label="Open file", command=self._open_file)
         self.menu.add_command(label="Open folder", command=lambda: open_externally(self.folder))
         self.menu_btn = ttk.Button(buttons, text="⋯", width=3, command=self._open_menu)
@@ -213,6 +214,7 @@ class HistoryWindow:
         busy = self.summarizing is not None
         for entry in ("Save as…", "Open file"):
             self.menu.entryconfigure(entry, state="normal" if m else "disabled")
+        self.menu.entryconfigure("Copy transcript for chat", state="normal" if m and m.lines else "disabled")
         self.ask_btn.configure(state="normal" if m and m.lines else "disabled")
         self.summary_btn.configure(state="normal" if m and m.summary else "disabled")
         self.summarize_btn.configure(state="normal" if m and m.lines and not busy else "disabled",
@@ -230,19 +232,26 @@ class HistoryWindow:
             open_externally(selected[0].path)
 
     def _save_as(self) -> None:
-        """A copy of the whole file, or the transcript alone (no summary, no questions) as Word or text."""
+        """A copy of the whole file, the summary and transcript as Word, or the transcript alone (no summary,
+        no questions) as Word or text."""
         if not (selected := self._selected()):
             return
         m = selected[0]
-        path = ask_save_path(self.win, self.folder, m.path.stem,
-                             [("Markdown: transcript, summary and questions", "*.md"),
-                              ("Word: transcript only", "*.docx"), ("Text: transcript only", "*.txt")])
-        if path is None:
+        chosen = ask_save_path(self.win, self.folder, m.path.stem,
+                               [("Markdown: transcript, summary and questions", "*.md")]
+                               + ([export.WORD_WITH_TRANSCRIPT] if m.summary else [])
+                               + [("Word: transcript only", "*.docx"), ("Text: transcript only", "*.txt")])
+        if chosen is None:
             return
-        heading = export.title(m.started, history.guess_language(m), transcript=True)
+        path, kind = chosen
+        language = history.guess_language(m)
+        heading = export.title(m.started, language, transcript=True)
         c = self.app.theme.colors
         try:
-            if path.suffix.lower() == ".docx":
+            if kind == export.WORD_WITH_TRANSCRIPT[0]:
+                path.write_bytes(export.to_docx(m.summary, export.title(m.started, language), m.export_lines(),
+                                                export.transcript_section(language)))
+            elif path.suffix.lower() == ".docx":
                 path.write_bytes(export.transcript_to_docx(m.export_lines(), heading))
             elif path.suffix.lower() == ".txt":
                 path.write_text(export.transcript_to_text(m.export_lines(), heading), encoding="utf-8")
@@ -252,6 +261,17 @@ class HistoryWindow:
             self.status.configure(text=f"Failed to save: {e}", fg=c["err"])
             return
         self.status.configure(text=f"Saved: {path}", fg=c["muted"])
+
+    def _copy_transcript(self) -> None:
+        if not (selected := self._selected()) or not selected[0].lines:
+            return
+        m = selected[0]
+        chat = export.transcript_to_chat(m.export_lines(),
+                                         export.title(m.started, history.guess_language(m), transcript=True))
+        self.win.clipboard_clear()
+        self.win.clipboard_append(chat)
+        message, color = export.copied_message(chat)
+        self.status.configure(text=message, fg=self.app.theme.colors[color])
 
     def _ask(self) -> None:
         if (selected := self._selected()) and selected[0].lines:

@@ -19,7 +19,7 @@ How the code is organized, how to test it, and how the libraries and the whisper
 | `summary.py` | Meeting summaries with Ollama or the Claude API |
 | `ask.py`, `ask_window.py` | Questions about a meeting (live or past): the answer and the transcript lines that back it up (checked against the transcript), saved in its file; the Ask window |
 | `subtitles.py` | SRT / WebVTT export |
-| `export.py` | The summary as chat text, plain text and Word (`.docx`, built without extra packages); the transcript alone, without the summary, as plain text and Word |
+| `export.py` | The summary as chat text, plain text and Word (`.docx`, built without extra packages), alone or with the transcript after it; the transcript alone, without the summary, as chat text, plain text and Word |
 | `history.py`, `history_window.py` | Reading past transcripts back, searching them, adding a summary or answers to them; the Meeting history window |
 | `alerts.py` | Alert words: matching them in a line, desktop notifications on each OS |
 | `ui.py` | The main window: status header, `⋯` menu, live captions with drafts and translations, alert words, the summary (on demand and automatic) |

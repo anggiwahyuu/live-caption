@@ -7,7 +7,7 @@ import datetime as dt
 import re
 from pathlib import Path
 
-from . import export
+from . import export, history
 from .theme import ask_save_path
 
 
@@ -31,13 +31,19 @@ def open_summary_window(root, theme, text: str, started: dt.datetime, language: 
         set_status(f"Summary copied {what}", "muted")
 
     def save() -> None:
-        path = ask_save_path(win, transcript.parent, f"{transcript.stem}-summary",
-                             [("Word document", "*.docx"), ("Text", "*.txt"), ("Markdown", "*.md")])
-        if path is None:
+        chosen = ask_save_path(win, transcript.parent, f"{transcript.stem}-summary",
+                               [("Word: summary only", "*.docx"), export.WORD_WITH_TRANSCRIPT, ("Text", "*.txt"),
+                                ("Markdown", "*.md")])
+        if chosen is None:
             return
+        path, kind = chosen
         ext = path.suffix.lower()
         try:
-            if ext == ".docx":
+            if kind == export.WORD_WITH_TRANSCRIPT[0]:
+                # the transcript as saved in its file (the live meeting's is saved after every line)
+                lines = history.read_meeting(transcript).export_lines()
+                path.write_bytes(export.to_docx(text, heading, lines, export.transcript_section(language)))
+            elif ext == ".docx":
                 path.write_bytes(export.to_docx(text, heading))
             elif ext == ".md":
                 path.write_text(f"# {heading}\n\n{text}\n", encoding="utf-8")

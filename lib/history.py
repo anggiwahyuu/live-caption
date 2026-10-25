@@ -61,6 +61,10 @@ class Meeting:
         """The lines as the summarizer reads them: "[10:00:05] Participant: text"."""
         return "\n".join(f"[{x.time}] {x.label}: {x.text}" for x in self.lines)
 
+    def export_lines(self) -> list[tuple[str, str, str, str | None]]:
+        """The lines for export.transcript_to_text / transcript_to_docx."""
+        return [(x.time, x.label, x.text, x.translation) for x in self.lines]
+
 
 def started_from(path: Path) -> dt.datetime:
     """The start time is in the file name (meeting-2026-10-21_1601.md); else the file's time."""

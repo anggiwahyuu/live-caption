@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import alerts, history, theme
+from . import alerts, export, history, theme
 from .ask_window import AskWindow
 from .common import IS_MAC
 from .config import DEFAULT_GEOMETRY, load_window_state, restore_geometry, save_window_state
@@ -424,15 +424,15 @@ class App:
         self.search.refresh()
 
     def _save_as(self) -> None:
-        from tkinter import filedialog, simpledialog
+        from tkinter import simpledialog
         started = self.transcript.started
-        path = filedialog.asksaveasfilename(
-            defaultextension=".md", initialfile=self.transcript.path.name,
-            filetypes=[("Markdown", "*.md"), ("Text", "*.txt"),
-                       ("Subtitles (SubRip)", "*.srt"), ("Subtitles (WebVTT)", "*.vtt")])
-        if not path:
+        path = theme.ask_save_path(
+            self.root, self.transcript.path.parent, self.transcript.path.stem,
+            [("Markdown: transcript, summary and questions", "*.md"), ("Word: transcript only", "*.docx"),
+             ("Text: transcript only", "*.txt"), ("Subtitles (SubRip)", "*.srt"), ("Subtitles (WebVTT)", "*.vtt")])
+        if path is None:
             return
-        ext = Path(path).suffix.lower()
+        ext = path.suffix.lower()
         note = ""
         if ext in (".srt", ".vtt"):
             answer = simpledialog.askstring(
@@ -448,10 +448,17 @@ class App:
                 return
             content, count = self.transcript.subtitles(origin, ext[1:])
             note = f" ({count} subtitles)"
+        elif ext in (".docx", ".txt"):
+            heading = export.title(started, self.transcript.main_language(), transcript=True)
+            to = export.transcript_to_docx if ext == ".docx" else export.transcript_to_text
+            content = to(self.transcript.export_lines(), heading)
         else:
             content = self.transcript.render()
         try:
-            Path(path).write_text(content, encoding="utf-8")
+            if isinstance(content, bytes):
+                path.write_bytes(content)
+            else:
+                path.write_text(content, encoding="utf-8")
         except OSError as e:
             self._set_status(f"Failed to save: {e}", "err", always=True)
             return

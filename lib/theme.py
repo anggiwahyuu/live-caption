@@ -1,4 +1,4 @@
-"""Colors, fonts and ttk styles shared by every window (main, summary, history)."""
+"""Colors, fonts and ttk styles shared by every window (main, summary, history), and their Save dialog."""
 
 from __future__ import annotations
 
@@ -80,3 +80,23 @@ def setup(root, font_size: int) -> Theme:
                     lightcolor=c["field"], darkcolor=c["field"], font=theme.ui, relief="flat")
     style.map("History.Treeview.Heading", background=[("active", c["hover"])])
     return theme
+
+
+def ask_save_path(parent, initialdir, name: str, filetypes: list[tuple[str, str]]):
+    """A Save dialog -> Path, or None if cancelled. name has no extension: the file gets the one of the type
+    chosen in the dialog (unless one of the types' is typed). filetypes: [(label, "*.ext")], the first preselected."""
+    import tkinter as tk
+    from pathlib import Path
+    from tkinter import filedialog
+
+    chosen = tk.StringVar(parent, value=filetypes[0][0])
+    # Linux's Tk adds the chosen type's extension only without a default one; Windows and macOS only with one
+    default = None if IS_LINUX else filetypes[0][1][1:]
+    path = filedialog.asksaveasfilename(parent=parent, initialdir=initialdir, initialfile=name, filetypes=filetypes,
+                                        typevariable=chosen, defaultextension=default)
+    if not path:
+        return None
+    path = Path(path)
+    if path.suffix.lower() not in {pattern[1:] for _, pattern in filetypes}:
+        path = path.with_name(path.name + dict(filetypes).get(chosen.get(), filetypes[0][1])[1:])
+    return path

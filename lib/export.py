@@ -1,7 +1,8 @@
-"""The meeting summary in formats ready to send: chat text (WhatsApp, Slack, Telegram), plain text, Word.
+"""The meeting summary in formats ready to send: chat text (WhatsApp, Slack, Telegram), plain text, Word;
+and the transcript alone, without the summary, as plain text and Word.
 
 The summary is the light Markdown the summarizer writes: "### Heading", "- bullet", "-" for an empty
-section, and now and then **bold**.
+section, and now and then **bold**. A transcript is a list of TranscriptLine.
 """
 
 from __future__ import annotations
@@ -13,18 +14,22 @@ import zipfile
 from xml.sax.saxutils import escape
 
 TITLES = {"id": "Ringkasan rapat", "en": "Meeting summary"}
+TRANSCRIPT_TITLES = {"id": "Transkrip rapat", "en": "Meeting transcript"}
+# (time "10:00:05", speaker label, text, translation or None)
+TranscriptLine = tuple[str, str, str, str | None]
 MONTHS = {"id": ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober",
                  "November", "Desember"],
           "en": ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
                  "November", "December"]}
 
 
-def title(started: dt.datetime, language: str | None) -> str:
-    """ "Ringkasan rapat — 22 Oktober 2026, 10:00" in the summary's language (English for others)."""
+def title(started: dt.datetime, language: str | None, transcript: bool = False) -> str:
+    """ "Ringkasan rapat — 22 Oktober 2026, 10:00" in the summary's language (English for others);
+    with transcript=True, "Transkrip rapat — …"."""
     lang = language if language in TITLES else "en"
     month = MONTHS[lang][started.month - 1]
     date = f"{started.day} {month} {started.year}" if lang == "id" else f"{month} {started.day}, {started.year}"
-    return f"{TITLES[lang]} — {date}, {started:%H:%M}"
+    return f"{(TRANSCRIPT_TITLES if transcript else TITLES)[lang]} — {date}, {started:%H:%M}"
 
 
 def blocks(summary: str) -> list[tuple[str, str]]:
@@ -76,6 +81,16 @@ def to_text(summary: str, heading: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def transcript_to_text(lines: list[TranscriptLine], heading: str) -> str:
+    """The transcript alone as plain text: "[10:00:05] Participant: text", the translation indented below."""
+    out = [heading, "=" * len(heading), ""]
+    for time, label, text, translation in lines:
+        out.append(f"[{time}] {label}: {text}")
+        if translation:
+            out.append(f"    ↳ {translation}")
+    return "\n".join(out) + "\n"
+
+
 # ---- Word (.docx): the smallest valid document, built by hand so no extra package is needed
 
 _CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -90,13 +105,14 @@ _RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </Relationships>"""
 
 
-def _runs(text: str, size: int, bold: bool = False, color: str | None = None) -> str:
-    """Word runs for text with **bold** parts. size in half-points (22 = 11 pt)."""
+def _runs(text: str, size: int, bold: bool = False, color: str | None = None, italic: bool = False,
+          markdown: bool = True) -> str:
+    """Word runs for text with **bold** parts (markdown=False: "**" is just text). size in half-points (22 = 11 pt)."""
     out = []
-    for i, part in enumerate(re.split(r"\*\*(.+?)\*\*", text)):
+    for i, part in enumerate(re.split(r"\*\*(.+?)\*\*", text) if markdown else [text]):
         if not part:
             continue
-        props = f'<w:sz w:val="{size}"/>' + ("<w:b/>" if bold or i % 2 else "") + \
+        props = f'<w:sz w:val="{size}"/>' + ("<w:b/>" if bold or i % 2 else "") + ("<w:i/>" if italic else "") + \
             (f'<w:color w:val="{color}"/>' if color else "")
         out.append(f'<w:r><w:rPr>{props}</w:rPr><w:t xml:space="preserve">{escape(part)}</w:t></w:r>')
     return "".join(out)
@@ -118,6 +134,22 @@ def to_docx(summary: str, heading: str) -> bytes:
             body.append(_paragraph(_runs(text, 22, color="808080"), indent=360))
         else:
             body.append(_paragraph(_runs(text, 22)))
+    return _document(body)
+
+
+def transcript_to_docx(lines: list[TranscriptLine], heading: str) -> bytes:
+    """The transcript alone: the time and speaker in bold, the translation in grey italics below."""
+    body = [_paragraph(_runs(heading, 32, bold=True), after=200)]
+    for time, label, text, translation in lines:
+        # what was said is text as heard: a "**" in it is not bold
+        head = _runs(f"[{time}] {label}: ", 22, bold=True, color="1F4E79", markdown=False)
+        body.append(_paragraph(head + _runs(text, 22, markdown=False), after=40 if translation else 80))
+        if translation:
+            body.append(_paragraph(_runs(translation, 20, color="808080", italic=True, markdown=False), indent=360))
+    return _document(body)
+
+
+def _document(body: list[str]) -> bytes:
     document = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
                 + "".join(body) +

@@ -131,7 +131,7 @@ The dot shows the state at a glance: **green** listening, **amber** paused, **re
 | **Ask about the meeting…** | `⋯` menu | `Ctrl+K` | Ask a question and get the answer with the lines it comes from ([Asking about the meeting](#asking-about-the-meeting)) |
 | **Search…** | `⋯` menu | `Ctrl+F` | Search the captions on screen (see below) |
 | **Meeting history…** | `⋯` menu | `Ctrl+H` | Past meetings ([Meeting history](#meeting-history)) |
-| **Save as…** | `⋯` menu | `Ctrl+S` | A copy of the transcript (`.md`, `.txt`) or subtitles (`.srt`, `.vtt`) |
+| **Save as…** | `⋯` menu | `Ctrl+S` | A copy of the transcript file with its summary (`.md`), the transcript alone as a Word document (`.docx`) or plain text (`.txt`), or subtitles (`.srt`, `.vtt`) |
 | **Clear screen** | `⋯` menu | `Ctrl+L` | Clears *the screen only*. The transcript file stays intact |
 
 Shortcuts work while the window is focused. On macOS, use `Cmd` instead of `Ctrl`.
@@ -210,7 +210,7 @@ Every meeting is **saved automatically** as it goes, to `~/LiveCaption/meeting-<
   - _Selamat pagi semuanya, mari kita mulai rapatnya._
 ```
 
-`⋯` → **Meeting history…** (`Ctrl+H`) lists them, newest first. Type in the search box to search **all meetings at once** (all words must occur in the meeting; translations, summaries and questions count too). For the selected meeting: **Summarize** makes or redoes its summary, **Ask…** asks questions about it, **Open file** opens the transcript in your editor.
+`⋯` → **Meeting history…** (`Ctrl+H`) lists them, newest first. Type in the search box to search **all meetings at once** (all words must occur in the meeting; translations, summaries and questions count too). For the selected meeting: **Summarize** makes or redoes its summary, **Ask…** asks questions about it, and the `⋯` menu has **Save as…** (like `Ctrl+S`: the whole file, or the transcript alone as Word or plain text) and **Open file**, which opens the transcript in your editor (or double-click the meeting).
 
 **Subtitles for a recording:** if you recorded the meeting (Zoom/Meet recording, OBS, …), choose **Save as…** (`Ctrl+S`) → **SubRip (`.srt`)** or **WebVTT (`.vtt`)**. The app asks when the recording started; subtitle times count from there. Put the file next to the video with the same name (`meeting.mp4` + `meeting.srt`) and VLC, mpv or a YouTube upload picks it up. If they run consistently early or late, export again with the start time adjusted.
 

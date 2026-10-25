@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import export, history
 from .summary import SummaryWorker
+from .theme import ask_save_path
 
 PREVIEW_LINES = 40  # lines shown for a meeting without a summary
 
@@ -60,10 +61,14 @@ class HistoryWindow:
         buttons = tk.Frame(win, bg=c["bg"])
         buttons.pack(side="bottom", fill="x", padx=12, pady=10)
         ttk.Button(buttons, text="Close", command=win.destroy).pack(side="right")
-        ttk.Button(buttons, text="Open folder", command=lambda: open_externally(self.folder)).pack(side="right",
-                                                                                                padx=(0, 6))
-        self.open_btn = ttk.Button(buttons, text="Open file", command=self._open_file)
-        self.open_btn.pack(side="right", padx=(0, 6))
+        # the ⋯ menu, as in the main window: what is used now and then (the buttons don't all fit beside each other)
+        self.menu = tk.Menu(win, tearoff=0, bg=c["field"], fg=c["fg"], activebackground=c["hover"],
+                            activeforeground=c["fg"], bd=0, relief="flat", font=theme.ui)
+        self.menu.add_command(label="Save as…", command=self._save_as)
+        self.menu.add_command(label="Open file", command=self._open_file)
+        self.menu.add_command(label="Open folder", command=lambda: open_externally(self.folder))
+        self.menu_btn = ttk.Button(buttons, text="⋯", width=3, command=self._open_menu)
+        self.menu_btn.pack(side="right", padx=(0, 6))
         self.ask_btn = ttk.Button(buttons, text="Ask…", command=self._ask)
         self.ask_btn.pack(side="right", padx=(0, 6))
         self.summary_btn = ttk.Button(buttons, text="Show summary", command=self._show_summary)
@@ -206,16 +211,47 @@ class HistoryWindow:
 
     def _update_buttons(self, m: history.Meeting | None) -> None:
         busy = self.summarizing is not None
-        self.open_btn.configure(state="normal" if m else "disabled")
+        for entry in ("Save as…", "Open file"):
+            self.menu.entryconfigure(entry, state="normal" if m else "disabled")
         self.ask_btn.configure(state="normal" if m and m.lines else "disabled")
         self.summary_btn.configure(state="normal" if m and m.summary else "disabled")
         self.summarize_btn.configure(state="normal" if m and m.lines and not busy else "disabled",
                                      text="✦  Summarize again" if m and m.summary else "✦  Summarize")
 
     # ---- actions
+    def _open_menu(self) -> None:
+        self.menu.update_idletasks()
+        btn = self.menu_btn
+        x = btn.winfo_rootx() + btn.winfo_width() - self.menu.winfo_reqwidth()  # right-aligned above ⋯
+        self.menu.tk_popup(x, btn.winfo_rooty() - self.menu.winfo_reqheight() - 2)
+
     def _open_file(self) -> None:
         if selected := self._selected():
             open_externally(selected[0].path)
+
+    def _save_as(self) -> None:
+        """A copy of the whole file, or the transcript alone (no summary, no questions) as Word or text."""
+        if not (selected := self._selected()):
+            return
+        m = selected[0]
+        path = ask_save_path(self.win, self.folder, m.path.stem,
+                             [("Markdown: transcript, summary and questions", "*.md"),
+                              ("Word: transcript only", "*.docx"), ("Text: transcript only", "*.txt")])
+        if path is None:
+            return
+        heading = export.title(m.started, history.guess_language(m), transcript=True)
+        c = self.app.theme.colors
+        try:
+            if path.suffix.lower() == ".docx":
+                path.write_bytes(export.transcript_to_docx(m.export_lines(), heading))
+            elif path.suffix.lower() == ".txt":
+                path.write_text(export.transcript_to_text(m.export_lines(), heading), encoding="utf-8")
+            else:
+                path.write_bytes(m.path.read_bytes())
+        except OSError as e:
+            self.status.configure(text=f"Failed to save: {e}", fg=c["err"])
+            return
+        self.status.configure(text=f"Saved: {path}", fg=c["muted"])
 
     def _ask(self) -> None:
         if (selected := self._selected()) and selected[0].lines:

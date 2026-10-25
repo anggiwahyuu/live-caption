@@ -8,13 +8,14 @@ import re
 from pathlib import Path
 
 from . import export
+from .theme import ask_save_path
 
 
 def open_summary_window(root, theme, text: str, started: dt.datetime, language: str | None, transcript: Path,
                         topmost: bool, set_status):
     """set_status(message, color): where "copied" / "saved" messages go (the main window's status line)."""
     import tkinter as tk
-    from tkinter import filedialog, ttk
+    from tkinter import ttk
 
     c = theme.colors
     heading = export.title(started, language)
@@ -30,20 +31,18 @@ def open_summary_window(root, theme, text: str, started: dt.datetime, language: 
         set_status(f"Summary copied {what}", "muted")
 
     def save() -> None:
-        path = filedialog.asksaveasfilename(
-            parent=win, defaultextension=".docx", initialdir=str(transcript.parent),
-            initialfile=f"{transcript.stem}-summary.docx",
-            filetypes=[("Word document", "*.docx"), ("Text", "*.txt"), ("Markdown", "*.md")])
-        if not path:
+        path = ask_save_path(win, transcript.parent, f"{transcript.stem}-summary",
+                             [("Word document", "*.docx"), ("Text", "*.txt"), ("Markdown", "*.md")])
+        if path is None:
             return
-        ext = Path(path).suffix.lower()
+        ext = path.suffix.lower()
         try:
             if ext == ".docx":
-                Path(path).write_bytes(export.to_docx(text, heading))
+                path.write_bytes(export.to_docx(text, heading))
             elif ext == ".md":
-                Path(path).write_text(f"# {heading}\n\n{text}\n", encoding="utf-8")
+                path.write_text(f"# {heading}\n\n{text}\n", encoding="utf-8")
             else:
-                Path(path).write_text(export.to_text(text, heading), encoding="utf-8")
+                path.write_text(export.to_text(text, heading), encoding="utf-8")
         except OSError as e:
             set_status(f"Failed to save: {e}", "err")
             return

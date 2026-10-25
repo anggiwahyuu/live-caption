@@ -54,6 +54,10 @@ class Transcript:
         """The lines as the summarizer reads them: "[10:00:05] Participant: text"."""
         return "\n".join(f"[{r['ts']:%H:%M:%S}] {r['label']}: {r['text']}" for r in self.records.values())
 
+    def export_lines(self) -> list[tuple[str, str, str, str | None]]:
+        """The lines for export.transcript_to_text / transcript_to_docx."""
+        return [(f"{r['ts']:%H:%M:%S}", r["label"], r["text"], r["tr"]) for r in self.records.values()]
+
     def main_language(self) -> str | None:
         """The language Whisper heard most, weighted by how much was said in each."""
         spoken = collections.Counter()

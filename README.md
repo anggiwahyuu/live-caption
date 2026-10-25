@@ -89,7 +89,7 @@ Once it says **Ready**, captions appear as soon as someone speaks.
 | Command | What gets transcribed | Label on screen |
 |---|---|---|
 | `./run.sh` (default `--source system`) | Other participants (audio coming out of your speakers/headset) | **Participant** |
-| `./run.sh --source mic` | Your voice, from the default microphone | **Me** |
+| `./run.sh --source mic` | Your voice, from the default microphone | **Me**, or your name with `--my-name` |
 | `./run.sh --source both` | Both at once | **Participant** and **Me** |
 | `./run.sh --monitor <name>` | A specific output instead of the default one, e.g. HDMI or Bluetooth | **Participant** |
 
@@ -189,7 +189,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # or: ant auth login
 
 The default model is `claude-opus-5-5` (`--summary-model` changes it); each summary is billed to your API account (an hour-long meeting is roughly 15–20k input tokens).
 
-Summaries are written in the meeting's main language; `--summary-lang id` picks another. Speakers aren't told apart (only **Me** vs **Participant**), so check names and action items before sending a summary on.
+Summaries are written in the meeting's main language; `--summary-lang id` picks another. Speakers aren't told apart (only **Me**, or your `--my-name`, vs **Participant**), so check names and action items before sending a summary on.
 
 ### Asking about the meeting
 
@@ -282,6 +282,7 @@ After that, a plain `./run.sh` (and the menu shortcut) uses these settings. Opti
 | `--summarizer`, `--summary-model`, `--summary-lang`, `--ollama-url` | Summary engine, model, language and Ollama address ([Meeting summary](#meeting-summary)) |
 | `--auto-summary` / `--no-auto-summary` | Start with **Auto summary** on / off, whatever the tick says |
 | `--alert "Anggi, backend team"` | Alert words for this run ([Alert words](#alert-words)) |
+| `--my-name "Anggi"` | Your name in place of **Me**: on screen, in the transcript file, summaries (e.g. action items), answers and exports. Put `my-name = "Anggi"` in `config.toml` to keep it. Meetings saved before still say **Me** |
 | `--out-dir <folder>` | Where transcripts are saved (default `~/LiveCaption`) |
 | `--font-size 15`, `--opacity 1` | Text size (default 13) and window opacity (default 0.93) |
 | `--geometry 760x280+0+800` | Window size and position for this run |

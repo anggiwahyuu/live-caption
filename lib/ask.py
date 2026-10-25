@@ -11,12 +11,12 @@ import re
 import threading
 from dataclasses import dataclass, field
 
-from .summary import Summarizer, locate_quote
+from .summary import Summarizer, locate_quote, recorder
 
 MAX_SOURCES = 3
 
 ASK_SYSTEM = """You answer questions about a meeting, using only its transcript (live speech-to-text).
-Each line is "[HH:MM:SS] Speaker: text". "Me" is the person who recorded the meeting; "Participant" is everyone
+Each line is "[HH:MM:SS] Speaker: text". {me} is the person who recorded the meeting; "Participant" is everyone
 else (several people, not told apart). The transcript may contain recognition errors and cut-off sentences.
 Never invent facts, names, numbers or dates.
 People in the meeting often use other words than the question: a "requirement" may be something someone asked
@@ -110,7 +110,8 @@ def check_sources(quotes: list[str], transcript: str) -> tuple[list[Source], int
 def ask(summarizer: Summarizer, transcript: str, question: str) -> Answer:
     # The transcript comes first and stays the same from one question to the next, so Ollama reuses what it
     # already read (its prompt cache) and a follow-up question costs little more than its answer.
-    raw = summarizer.complete(ASK_SYSTEM, f"{transcript}\n\n{ASK_TASK.format(question=question)}", ASK_SCHEMA)
+    system = ASK_SYSTEM.format(me=recorder(summarizer.me))
+    raw = summarizer.complete(system, f"{transcript}\n\n{ASK_TASK.format(question=question)}", ASK_SCHEMA)
     text, quotes = parse_answer(raw)
     sources, unsupported = check_sources(quotes, transcript)
     return Answer(question, text, sources, unsupported)

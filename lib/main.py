@@ -62,7 +62,8 @@ def main() -> None:
     names = ["system", "mic"] if args.source == "both" else [args.source]
     captures = []
     for name in names:
-        seg = Segmenter(SOURCES[name], hub, args.threshold, args.silence_ms, args.max_seconds, args.draft_interval,
+        label = args.my_name if name == "mic" else SOURCES[name]
+        seg = Segmenter(label, hub, args.threshold, args.silence_ms, args.max_seconds, args.draft_interval,
                         paused=paused)
         captures.append(AudioCapture(name, args.monitor if name == "system" else None, seg, stop, report))
 
@@ -80,7 +81,7 @@ def main() -> None:
             c.stop()
         root.destroy()
 
-    summarizer = Summarizer(args.summarizer, args.summary_model, args.ollama_url)
+    summarizer = Summarizer(args.summarizer, args.summary_model, args.ollama_url, args.my_name)
     App(root, args, ui_q, tr_q, translator, paused, summarizer, shutdown)
     for w in workers:
         w.start()

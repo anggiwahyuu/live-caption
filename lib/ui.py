@@ -338,8 +338,10 @@ class App:
         line_id = self.transcript.add(ts, label, text, lang, end)
         parts = []
         if label != self.last_speaker or self.last_ts is None or ts - self.last_ts > NEW_SPEAKER_GAP:
-            parts += [(label, label), (f"   {ts:%H:%M:%S}\n", "time")]
-        spans = alerts.find(self.alert_re, text) if label != "Me" else []  # your own voice saying your name: no alert
+            role = "Me" if label == self.args.my_name else "Participant"  # the tag with its color
+            parts += [(label, role), (f"   {ts:%H:%M:%S}\n", "time")]
+        # your own voice saying your name: no alert
+        spans = alerts.find(self.alert_re, text) if label != self.args.my_name else []
         pos = 0
         for start, stop in spans:  # the alert words highlighted inside the line
             parts += [(text[pos:start], "body"), (text[start:stop], ("body", "alert"))]

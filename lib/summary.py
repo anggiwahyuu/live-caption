@@ -15,7 +15,7 @@ SUMMARY_PROMPT = """You summarize meeting transcripts produced by live speech-to
 
 The transcript may contain recognition errors, cut-off sentences and repeated fragments. Infer what was meant,
 but never invent facts, names, numbers or dates that are not supported by the transcript.
-"Me" is the person who recorded the meeting; "Participant" is everyone else (speakers are not told apart).
+{me} is the person who recorded the meeting; "Participant" is everyone else (speakers are not told apart).
 When people are addressed or named in the transcript, use those names.
 
 Be precise about what was actually agreed:
@@ -57,6 +57,12 @@ HEADINGS = {
 }
 
 
+def recorder(me: str) -> str:
+    """How the prompts name the person who recorded the meeting: their label, which is "Me" unless --my-name
+    gives their name (older transcripts still say "Me")."""
+    return '"Me"' if me == "Me" else f'"{me}" (in older transcripts "Me")'
+
+
 def language_name(code: str | None) -> str:
     if not code:
         return "the main language of the transcript"
@@ -69,7 +75,7 @@ def language_name(code: str | None) -> str:
 # first asks for structured items, each with a word-for-word quote, and keeps only what the transcript supports.
 
 LOCAL_SYSTEM = """You help summarize a meeting transcript produced by live speech-to-text.
-Each line is "[HH:MM:SS] Speaker: text". "Me" is the person who recorded the meeting; "Participant" is everyone
+Each line is "[HH:MM:SS] Speaker: text". {me} is the person who recorded the meeting; "Participant" is everyone
 else (several people, not told apart). The transcript may contain recognition errors and cut-off sentences.
 Never invent facts, names, numbers or dates."""
 
@@ -81,7 +87,7 @@ EXTRACT_TASK = """Go through the transcript above and list:
 
 Rules for every item:
 - "quote": copied word for word from the transcript line that shows the item (the text after "Speaker:").
-- "who": who will do the task: "Me" or "Participant".
+- "who": who will do the task: "{me_name}" or "Participant".
 - "named": the name of the person who will do the task if the quote or the lines around it say it
   (e.g. "Sari, please …" -> "Sari"), otherwise "".
 - "task": what to do, without the deadline.
@@ -180,7 +186,7 @@ def _drop_invented_dates(text: str, transcript_words: set[str]) -> str:
     return text.strip()
 
 
-def verify_items(data: dict, transcript: str) -> tuple[dict, int]:
+def verify_items(data: dict, transcript: str, me: str = "Me") -> tuple[dict, int]:
     """Keep only items whose quote is in the transcript; fix names and deadlines it doesn't support.
     Returns (items, number of dropped items)."""
     lines = parse_transcript(transcript)
@@ -203,7 +209,7 @@ def verify_items(data: dict, transcript: str) -> tuple[dict, int]:
                 deadline = str(item.get("deadline", "")).strip()
                 if named and _supported(named, nearby):
                     who = named  # a name said right there beats the generic label
-                elif who not in ("Me", "Participant") and not (who and _supported(who, nearby)):
+                elif who not in ("Me", me, "Participant") and not (who and _supported(who, nearby)):
                     who = lines[i][0]  # a name the transcript doesn't give here: use who said the quoted line
                 if deadline and not _deadline_supported(deadline, nearby):
                     deadline = ""
@@ -242,8 +248,9 @@ class Summarizer:
 
     DEFAULT_MODELS = {"ollama": "qwen2.5:7b", "claude": "claude-opus-5-5"}
 
-    def __init__(self, provider: str, model: str | None, ollama_url: str):
+    def __init__(self, provider: str, model: str | None, ollama_url: str, me: str = "Me"):
         self.provider = provider
+        self.me = me  # the label of the person who recorded the meeting (--my-name)
         self.model = model or self.DEFAULT_MODELS[provider]
         self.ollama_url = ollama_url.rstrip("/")
 
@@ -263,7 +270,7 @@ class Summarizer:
             except ValueError:
                 pass  # the model didn't return usable JSON: fall back to the one-pass summary below
         system = SUMMARY_PROMPT.format(language=name, h_summary=headings[0], h_decisions=headings[1],
-                                       h_actions=headings[2], h_questions=headings[3])
+                                       h_actions=headings[2], h_questions=headings[3], me=recorder(self.me))
         # Repeated after the transcript: small local models otherwise drift into English.
         user = f"{transcript}\n\n(Write the summary in {name}.)"
         if self.provider == "claude":
@@ -289,24 +296,25 @@ class Summarizer:
         # Both requests start with the same system prompt + transcript, so Ollama reuses what it already read
         # (its prompt cache) and the second pass costs little more than its own short answer.
         num_ctx = self._num_ctx(transcript + EXTRACT_TASK) + 1024
-        raw = self._ollama(LOCAL_SYSTEM, f"{transcript}\n\n{EXTRACT_TASK.format(language=language)}", num_ctx,
-                           temperature=0.0, fmt=EXTRACT_SCHEMA)
+        system = LOCAL_SYSTEM.format(me=recorder(self.me))
+        raw = self._ollama(system, f"{transcript}\n\n{EXTRACT_TASK.format(language=language, me_name=self.me)}",
+                           num_ctx, temperature=0.0, fmt=EXTRACT_SCHEMA)
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
             raise ValueError(f"no JSON from the model: {e}")
         if not isinstance(data, dict):
             raise ValueError("unexpected JSON from the model")
-        items, _dropped = verify_items(data, transcript)
+        items, _dropped = verify_items(data, transcript, self.me)
 
         points = [f"- decision: {d['text']}" for d in items["decisions"]]
         points += [f"- task: {a['who']}: {a['task']}" + (f" ({a['deadline']})" if a["deadline"] else "")
                    for a in items["action_items"]]
         points += [f"- open question: {q['text']}" for q in items["open_questions"]]
         task = OVERVIEW_TASK.format(language=language, points="\n".join(points) or "- (none)")
-        overview = self._ollama(LOCAL_SYSTEM, f"{transcript}\n\n{task}", num_ctx, temperature=0.0)
+        overview = self._ollama(system, f"{transcript}\n\n{task}", num_ctx, temperature=0.0)
         if language != "English" and _looks_english(overview):  # small models sometimes drift mid-paragraph
-            overview = self._ollama(LOCAL_SYSTEM, f"{transcript}\n\n{task}\nEvery sentence must be in {language}.",
+            overview = self._ollama(system, f"{transcript}\n\n{task}\nEvery sentence must be in {language}.",
                                     num_ctx, temperature=0.0)
         overview = re.sub(r"^#+.*\n?", "", overview).strip()  # in case it added a heading anyway
         all_words = set(_words(transcript))

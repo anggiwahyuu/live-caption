@@ -182,6 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alert", default=None,
                    help='Comma-separated words to watch for, e.g. "Anggi, backend team". When someone else says one, '
                         "it is highlighted and a desktop notification appears (default: as set in the window menu)")
+    p.add_argument("--my-name", default="Me",
+                   help='Your name in transcripts, summaries and exports, in place of "Me" (what your microphone '
+                        'picks up), e.g. "Anggi". Everyone else stays "Participant"')
     p.add_argument("--summarizer", default="ollama", choices=["ollama", "claude"],
                    help="Engine for the Summary button. ollama = local & private (default), "
                         "claude = Claude API, better quality but the transcript is sent to Anthropic")
@@ -227,6 +230,10 @@ def parse_args(argv: list[str] | None = None):
 
     args = p.parse_args(config_argv + argv)  # command-line options come last, so they win
     args._config_path = path
+    args.my_name = " ".join(args.my_name.split()) or "Me"
+    # transcript lines are "**[10:00:05] Name:** text" (read back by history.py, ask.py, summary.py)
+    if any(ch in args.my_name for ch in ":*") or args.my_name.casefold() == "participant":
+        p.error(f'--my-name {args.my_name!r}: use a name without ":" or "*", other than "Participant"')
     if args.alert is None:  # the words set in the window last time (they are also hotwords for Whisper below)
         args.alert = ", ".join(w for w in load_window_state().get("alert_words") or [] if isinstance(w, str))
     args._whisper_transcribe = make_transcribe_fn(args.beam_size, load_vocab(args))

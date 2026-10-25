@@ -198,7 +198,7 @@ class HistoryWindow:
     def _insert_line(self, line: history.Line, words: list[str]) -> None:
         t = self.text
         t.insert("end", f"{line.time}  ", "muted")
-        t.insert("end", f"{line.label}: ", line.label if line.label in ("Me", "Participant") else "Participant")
+        t.insert("end", f"{line.label}: ", "Me" if line.label in ("Me", self.app.args.my_name) else "Participant")
         start = t.index("end-1c")
         t.insert("end", line.text + "\n")
         if line.translation:
